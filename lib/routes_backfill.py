@@ -1,0 +1,95 @@
+"""Admin-triggered, resumable backfill of existing image libraries.
+
+Crawls each in-scope user's files for images and enqueues them. The queue's per-file etag marker
+makes re-runs cheap (already-processed, unchanged files are skipped by the worker).
+"""
+
+from __future__ import annotations
+
+import threading
+from typing import Annotated
+
+import job_queue
+from fastapi import APIRouter, BackgroundTasks, Depends
+from nc_py_api import NextcloudApp
+from nc_py_api.ex_app import LogLvl, nc_app
+from pydantic import BaseModel
+
+router = APIRouter()
+
+_IMAGE_QUERY = ["and", "gt", "size", 0, "like", "mime", "image/%"]
+
+_lock = threading.Lock()
+_state = {
+    "running": False,
+    "enqueued": 0,
+    "users_total": 0,
+    "users_done": 0,
+    "current_user": "",
+    "error": "",
+}
+
+
+class BackfillRequest(BaseModel):
+    users: list[str] = []
+    path: str = ""
+
+
+def _resolve_users(nc: NextcloudApp) -> list[str]:
+    try:
+        users = nc.users.get_list()
+        if users:
+            return users
+    except Exception:  # provisioning scope may be unavailable; fall back to the caller
+        pass
+    return [nc.user] if nc.user else []
+
+
+def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
+    with _lock:
+        _state.update(running=True, enqueued=0, users_total=len(users), users_done=0, current_user="", error="")
+    try:
+        for uid in users:
+            if not _state["running"]:
+                break
+            _state["current_user"] = uid
+            nc.set_user(uid)
+            for node in nc.files.find(list(_IMAGE_QUERY), path=path):
+                if not _state["running"]:
+                    break
+                job_queue.enqueue(uid, node.info.fileid, source="backfill")
+                _state["enqueued"] += 1
+            _state["users_done"] += 1
+        nc.log(LogLvl.INFO, f"recognize_llm: backfill enqueued {_state['enqueued']} images")
+    except Exception as e:
+        _state["error"] = str(e)
+        nc.log(LogLvl.ERROR, f"recognize_llm: backfill failed: {e}")
+    finally:
+        _state["running"] = False
+        _state["current_user"] = ""
+
+
+@router.post("/backfill/start")
+def start(
+    req: BackfillRequest,
+    nc: Annotated[NextcloudApp, Depends(nc_app)],
+    background_tasks: BackgroundTasks,
+) -> dict:
+    if _state["running"]:
+        return {"status": "already_running", **_state}
+    users = req.users or _resolve_users(nc)
+    if not users:
+        return {"status": "no_users", "detail": "could not resolve any users to scan"}
+    background_tasks.add_task(_crawl, nc, users, req.path)
+    return {"status": "started", "users": users, "path": req.path or "/"}
+
+
+@router.post("/backfill/stop")
+def stop() -> dict:
+    _state["running"] = False
+    return {"status": "stopping"}
+
+
+@router.get("/backfill/status")
+def status() -> dict:
+    return {"crawl": dict(_state), "queue": job_queue.status()}

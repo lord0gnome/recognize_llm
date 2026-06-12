@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<info>
+	<id>recognize_llm</id>
+	<name>Recognize LLM</name>
+	<summary>Tag and describe photos with a local llama.cpp vision model</summary>
+	<description>
+	<![CDATA[
+Generates descriptive metadata for images using a locally-hosted llama.cpp vision model.
+
+For every new upload (and, on demand, for an existing library via backfill) the app sends the
+image to a local OpenAI-compatible vision endpoint and writes the result back into Nextcloud as
+collaborative **system tags** plus a free-text **description**. Original image files are never
+modified. Also registered as a TaskProcessing provider so other Nextcloud AI features can reuse it.
+	]]>
+	</description>
+	<version>0.1.0</version>
+	<licence>agpl</licence>
+	<author mail="lord0gnome@gmail.com">gnome</author>
+	<namespace>RecognizeLlm</namespace>
+	<category>multimedia</category>
+	<category>tools</category>
+	<bugs>https://github.com/lord0gnome/recognize_llm/issues</bugs>
+	<dependencies>
+		<nextcloud min-version="30" max-version="34"/>
+	</dependencies>
+	<external-app>
+		<docker-install>
+			<registry>ghcr.io</registry>
+			<image>lord0gnome/recognize_llm</image>
+			<image-tag>latest</image-tag>
+		</docker-install>
+		<scopes>
+			<value>FILES</value>
+			<value>SYSTEMTAGS</value>
+			<value>TASK_PROCESSING</value>
+			<value>NOTIFICATIONS</value>
+			<value>AI_PROVIDERS</value>
+		</scopes>
+		<routes>
+			<route>
+				<url>.*</url>
+				<verb>GET,POST,PUT,DELETE</verb>
+				<access_level>ADMIN</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+		</routes>
+	</external-app>
+</info>
