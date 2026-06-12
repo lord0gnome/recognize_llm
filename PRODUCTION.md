@@ -181,6 +181,7 @@ occ app_api:app:register recognize_llm dsp_http --info-xml /tmp/recognize_llm.xm
 
 | Symptom | Cause / fix |
 |---|---|
+| `Failed to enable ExApp` / silent enable failure / 996 on `POST /api/v1/events_listener` | **app_api ships no events_listener implementation (CONFIRMED on app_api 33.0.0).** Upload events can't register. Patch `apps/app_api/lib/` with `EventsListenerController.php`, `EventsListenerService.php`, `Listener/NodeEventListener.php`, and register `NodeEventListener` for `NodeCreatedEvent`/`NodeWrittenEvent` in `AppInfo/Application.php`; disable/enable the exApp. **Re-apply after every `occ app:update app_api`** (it overwrites them). Backfill + provider work without this; only new-upload events break. |
 | `Failed to pull image … 403/500` | Image not pullable: make the GHCR package public, or `podman login ghcr.io` on the host. Confirm `<registry>/<image>:<tag>` in info.xml matches what you pushed. |
 | Heartbeat fails / NC hits `localhost:23000` | Daemon missing `--net`; exApp landed on the wrong network. Re-register the daemon with `--net=<your network>` and redeploy. |
 | exApp can't reach llama (`Connection refused`) | Use `host.containers.internal`; if llama is on the LAN, open the host firewall for the Podman subnet. `/v1/models` open but completions `401` → set `api_key`. |
