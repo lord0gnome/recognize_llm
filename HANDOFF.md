@@ -124,7 +124,8 @@ Recognize LLM). Other settings (prompt, max tags, mimetypes, concurrency) are ed
   `NodeWrittenEvent` in `AppInfo/Application.php`; then disable/enable `recognize_llm`. **`occ
   app:update app_api` overwrites these four files** — re-apply after any app_api update. Verify:
   `SELECT * FROM oc_ex_event_handlers;` shows a recognize_llm row, and
-  `podman logs nc_app_recognize_llm | grep events/node` shows hits after an upload.
+  `podman logs nc_app_recognize_llm | grep events/node` shows hits after an upload. **The captured
+  patch + a one-command restore live in the repo: `appapi-patches/app_api-33.0.0/` (`./apply.sh`).**
 - **Image pull always happens.** AppAPI always issues a pull through the DSP; it does not use a bare
   local image. A private GHCR package needs `podman login ghcr.io` on the host (the daemon proxies
   the host podman socket, which uses the host's registry auth), or make the package public.
