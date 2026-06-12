@@ -32,13 +32,20 @@ occ app:install app_api
 
 ## 2. Build & publish the image to GHCR
 
-```bash
-# One-time: log in so you can push (create a GitHub PAT with write:packages)
-echo "$GHCR_PAT" | podman login ghcr.io -u <your-github-user> --password-stdin
+The image is built and pushed automatically by GitHub Actions
+([.github/workflows/build.yml](.github/workflows/build.yml)) on every push to `main` and on `v*`
+tags — no local build needed. After a push, the image is at
+`ghcr.io/lord0gnome/recognize_llm:latest` (plus a `sha-<short>` tag, and the tag name for releases).
 
-cd recognize_llm
-make push GHCR_OWNER=<your-github-user>     # builds + pushes :0.1.0 and :latest
+```bash
+git push                       # main  -> :latest + :sha-xxxxxxx
+git tag v0.2.0 && git push --tags   # tag   -> :v0.2.0
 ```
+
+You can also trigger it manually from the repo's **Actions** tab (workflow_dispatch).
+
+> Need a local one-off without CI? `podman build -t ghcr.io/lord0gnome/recognize_llm:latest . &&
+> podman push ...` after `podman login ghcr.io`.
 
 Then **make the package pullable by the deploy daemon**. Either:
 - **Simplest:** on github.com → your `recognize_llm` package → *Package settings* → **change visibility to Public**; or
