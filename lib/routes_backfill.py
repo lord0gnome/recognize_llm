@@ -17,8 +17,6 @@ from pydantic import BaseModel
 
 router = APIRouter()
 
-_IMAGE_QUERY = ["and", "gt", "size", 0, "like", "mime", "image/%"]
-
 _lock = threading.Lock()
 _state = {
     "running": False,
@@ -54,9 +52,11 @@ def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
                 break
             _state["current_user"] = uid
             nc.set_user(uid)
-            for node in nc.files.find(list(_IMAGE_QUERY), path=path):
+            for node in nc.files.listdir(path or "", depth=-1):
                 if not _state["running"]:
                     break
+                if node.is_dir or not (node.info.mimetype or "").startswith("image/"):
+                    continue
                 job_queue.enqueue(uid, node.info.fileid, source="backfill")
                 _state["enqueued"] += 1
             _state["users_done"] += 1

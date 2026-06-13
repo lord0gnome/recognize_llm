@@ -49,14 +49,19 @@ def init_db() -> None:
 
 
 def enqueue(user_id: str, file_id: int, source: str = "manual", force: bool = False) -> None:
+    # Without force (backfill/event), don't reset already-done or in-flight jobs.
+    # With force (manual re-describe), always reset so the file is reprocessed.
+    conflict = (
+        "DO UPDATE SET status='pending', source=excluded.source, force=excluded.force, "
+        "attempts=0, error='', updated_at=excluded.updated_at"
+        + ("" if force else " WHERE jobs.status NOT IN ('done', 'processing')")
+    )
     with _connect() as con:
         con.execute(
-            """
+            f"""
             INSERT INTO jobs (user_id, file_id, status, source, force, attempts, error, updated_at)
             VALUES (?, ?, 'pending', ?, ?, 0, '', ?)
-            ON CONFLICT(user_id, file_id) DO UPDATE SET
-                status='pending', source=excluded.source, force=excluded.force,
-                attempts=0, error='', updated_at=excluded.updated_at
+            ON CONFLICT(user_id, file_id) {conflict}
             """,
             (user_id, int(file_id), source, 1 if force else 0, int(time.time())),
         )
