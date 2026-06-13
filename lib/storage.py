@@ -9,24 +9,40 @@ from __future__ import annotations
 
 import dav
 from nc_py_api import NextcloudApp, FsNode
-from nc_py_api._exceptions import NextcloudExceptionNotFound
+from nc_py_api._exceptions import NextcloudException, NextcloudExceptionNotFound
 from nc_py_api.ex_app import LogLvl
 from settings import Settings
 from vision_client import Caption
 
 
 def _ensure_tag(nc: NextcloudApp, name: str):
+    name_lower = name.lower()
+    tags = nc.files.list_tags()
+    existing = next((t for t in tags if t.display_name.lower() == name_lower), None)
+    if existing:
+        return existing
     try:
-        return nc.files.tag_by_name(name)
-    except NextcloudExceptionNotFound:
         nc.files.create_tag(name, user_visible=True, user_assignable=True)
-        return nc.files.tag_by_name(name)
+    except NextcloudException as e:
+        if e.status_code != 409:
+            raise
+        # Race or case-insensitive conflict — refresh and look again
+        tags = nc.files.list_tags()
+        existing = next((t for t in tags if t.display_name.lower() == name_lower), None)
+        if existing:
+            return existing
+        raise
+    return nc.files.tag_by_name(name)
 
 
 def write_results(nc: NextcloudApp, node: FsNode, caption: Caption, settings: Settings) -> None:
     for name in caption.tags[: settings.max_tags]:
         tag = _ensure_tag(nc, name)
-        nc.files.assign_tag(node, tag)
+        try:
+            nc.files.assign_tag(node, tag)
+        except NextcloudException as e:
+            if e.status_code != 409:  # 409 = already assigned, treat as idempotent
+                raise
 
     if caption.description:
         dav.set_props(nc, node, {dav.PROP_DESCRIPTION: caption.description})

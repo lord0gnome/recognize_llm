@@ -33,6 +33,7 @@ _KEYS: dict[str, tuple[str, str]] = {
     "concurrency": ("CONCURRENCY", "1"),
     "request_timeout": ("REQUEST_TIMEOUT", "180"),
     "write_comment": ("WRITE_COMMENT", "yes"),
+    "max_tokens": ("MAX_TOKENS", "1024"),
 }
 
 
@@ -47,6 +48,7 @@ class Settings:
     concurrency: int
     request_timeout: int
     write_comment: bool
+    max_tokens: int
 
     @property
     def chat_url(self) -> str:
@@ -86,4 +88,5 @@ def load(nc: NextcloudApp) -> Settings:
         concurrency=max(1, int(r["concurrency"] or 1)),
         request_timeout=max(10, int(r["request_timeout"] or 180)),
         write_comment=str(r["write_comment"]).lower() in ("1", "yes", "true", "on"),
+        max_tokens=max(64, int(r["max_tokens"] or 1024)),
     )

@@ -28,15 +28,22 @@ def _data_url(image: bytes, mimetype: str) -> str:
 
 
 def _extract_json(content: str) -> dict:
-    """Parse the model's reply as JSON, tolerating stray prose or markdown fences."""
+    """Parse the model's reply as JSON, tolerating stray prose, markdown fences, or truncation."""
     try:
         return json.loads(content)
     except json.JSONDecodeError:
         pass
     match = re.search(r"\{.*\}", content, re.DOTALL)
+    candidate = match.group(0) if match else content
     if match:
         try:
-            return json.loads(match.group(0))
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+    # Try repairing common max_tokens truncation: content cut mid-string in tags array
+    for suffix in ('"]}', ']}', '}'):
+        try:
+            return json.loads(candidate + suffix)
         except json.JSONDecodeError:
             pass
     raise VisionError(f"Model did not return parseable JSON: {content[:200]!r}")
@@ -73,7 +80,7 @@ class VisionClient:
                 }
             ],
             "temperature": 0.2,
-            "max_tokens": 512,
+            "max_tokens": self._s.max_tokens,
             "response_format": {"type": "json_object"},
         }
         if self._s.llama_model:
