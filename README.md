@@ -48,6 +48,7 @@ Settings live in Nextcloud app-config and can be seeded via environment variable
 | llama_url | `LLAMA_URL` | `http://host.docker.internal:8080` |
 | llama_model | `LLAMA_MODEL` | _(empty = server default)_ |
 | api_key | `LLAMA_API_KEY` | _(empty)_ |
+| max_tokens | `MAX_TOKENS` | `1024` |
 | prompt | `LLAMA_PROMPT` | built-in JSON-tagging prompt |
 | max_tags | `MAX_TAGS` | `8` |
 | mimetypes | `MIMETYPES` | `image/jpeg,image/png,image/webp,image/heic,…` |
@@ -95,6 +96,15 @@ make test       # python -m pytest tests/
 - [x] M1 processor + storage
 - [x] M2 upload events
 - [x] M3 resumable backfill
-- [ ] M4 TaskProcessing input-file fetch — verify `tasks_provider/{taskId}/file/{fileId}` against the
+- [x] M4 OCC command (`occ recognize_llm:backfill`) — no more manual curl
+- [x] M5 admin settings UI, `max_tokens` config, improved default prompt
+- [ ] M6 TaskProcessing input-file fetch — verify `tasks_provider/{taskId}/file/{fileId}` against the
       running server (see note in `lib/task_provider.py`)
-- [ ] M5 admin settings UI form, richer error reporting
+- [ ] M7 **Face detection and person grouping**
+  - Detect faces in images and extract embeddings (dedicated face-embedding model, e.g. InsightFace/ArcFace)
+  - Cluster embeddings across the library to identify unique individuals
+  - Assign a stable `person:N` system tag per cluster so all photos of the same person are linked
+  - Admin UI to review clusters, merge/split them, and optionally name a person
+    (named persons become a named tag, e.g. `person:alice`)
+  - Privacy mode: keep embeddings local, never send face crops to the vision endpoint
+  - Incremental: new uploads are matched against existing clusters in real time

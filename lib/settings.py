@@ -11,13 +11,22 @@ from dataclasses import dataclass
 
 from nc_py_api import NextcloudApp
 
-DEFAULT_PROMPT = (
-    "You are an image-tagging assistant. Look at the image and respond with ONLY a JSON object of "
-    'the form {"description": string, "tags": string[]}. '
-    '"description" is one or two factual sentences describing what is visible. '
-    '"tags" is 5-10 short lowercase keywords for the main objects, scene, setting and notable '
-    "attributes. Do not include any text outside the JSON object."
-)
+DEFAULT_PROMPT = """\
+You are a photo library metadata assistant. Examine the image and respond with ONLY a JSON object — no markdown, no text outside the JSON.
+
+{"description": string, "tags": string[]}
+
+"description": 1–3 factual sentences. Cover: the main subjects (for people note apparent roles or relationships like "a couple" or "two children" — never name individuals), the setting or location (room type, landscape, or any recognizable landmark or city), the activity or occasion if applicable, and any notable objects, text, or distinctive details visible in the image.
+
+"tags": 6–12 lowercase keywords optimised for searching a personal photo library. Draw from multiple dimensions:
+- Subjects: people, animals, objects (e.g. "dog", "birthday cake", "elderly man", "baby")
+- Setting: location and environment (e.g. "beach", "kitchen", "mountain trail", "eiffel tower", "forest")
+- Activity or occasion: what is happening (e.g. "hiking", "wedding", "cooking", "graduation", "concert")
+- Visual attributes: style or conditions (e.g. "aerial", "close-up", "night", "black and white", "fog")
+- Time of day or season when clearly visible (e.g. "sunset", "winter", "golden hour", "autumn")
+
+Tags must be lowercase. Do not output anything outside the JSON object.\
+"""
 
 # Keys as stored in appconfig_ex, paired with their env-var fallback and built-in default.
 _KEYS: dict[str, tuple[str, str]] = {
