@@ -81,6 +81,15 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 "recognize_llm_describe", "Describe with AI", "/describe_now",
                 mime="image", icon="img/icon.svg",
             )
+            nc.occ_commands.register(
+                "recognize_llm:backfill",
+                "/occ/backfill",
+                options=[
+                    {"name": "users", "shortcut": "u", "mode": "optional", "description": "Comma-separated user IDs to scan (default: all users)", "default": ""},
+                    {"name": "path",  "shortcut": "p", "mode": "optional", "description": "Restrict scan to this folder path (default: all files)",  "default": ""},
+                ],
+                description="Enqueue existing images for AI tagging and description.",
+            )
             workers.start(cfg.concurrency)
             provider_loop.start()
             nc.log(LogLvl.INFO, "recognize_llm enabled")
@@ -89,6 +98,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             task_provider.unregister(nc)
             _unregister_events_listener(nc)
             nc.ui.files_dropdown_menu.unregister("recognize_llm_describe")
+            nc.occ_commands.unregister("recognize_llm:backfill")
             nc.log(LogLvl.INFO, "recognize_llm disabled")
     except Exception as e:
         return str(e)

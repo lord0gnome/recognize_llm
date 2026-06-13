@@ -93,3 +93,26 @@ def stop() -> dict:
 @router.get("/backfill/status")
 def status() -> dict:
     return {"crawl": dict(_state), "queue": job_queue.status()}
+
+
+class OccBackfillRequest(BaseModel):
+    occ: dict = {}
+
+
+@router.post("/occ/backfill")
+def occ_backfill(
+    req: OccBackfillRequest,
+    nc: Annotated[NextcloudApp, Depends(nc_app)],
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """OCC command callback: ``occ recognize_llm:backfill [--users alice,bob] [--path /Photos]``."""
+    options = (req.occ.get("options") or {})
+    raw_users = options.get("users") or ""
+    path = options.get("path") or ""
+    users = [u.strip() for u in raw_users.split(",") if u.strip()] if raw_users else _resolve_users(nc)
+    if not users:
+        return {"status": "no_users"}
+    if _state["running"]:
+        return {"status": "already_running", **_state}
+    background_tasks.add_task(_crawl, nc, users, path)
+    return {"status": "started", "users": users, "path": path or "/"}
