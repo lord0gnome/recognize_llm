@@ -5,11 +5,23 @@ from __future__ import annotations
 import base64
 import json
 import re
+import socket
 from dataclasses import dataclass, field
 
 import httpx
 
 from settings import Settings
+
+# TCP keepalive: detect half-open connections (e.g. llama.cpp restart) within ~80s
+# Without this, a zombie socket with no data arriving will hang indefinitely —
+# httpx's read_timeout only fires between received bytes, not on a silent dead connection.
+_SOCKET_OPTIONS = [
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+] + [
+    (socket.IPPROTO_TCP, getattr(socket, attr), val)
+    for attr, val in [("TCP_KEEPIDLE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 5)]
+    if hasattr(socket, attr)
+]
 
 
 @dataclass
@@ -90,10 +102,10 @@ class VisionClient:
         if self._s.api_key:
             headers["Authorization"] = f"Bearer {self._s.api_key}"
 
+        transport = httpx.HTTPTransport(socket_options=_SOCKET_OPTIONS)
         try:
-            resp = httpx.post(
-                self._s.chat_url, json=payload, headers=headers, timeout=self._s.request_timeout
-            )
+            with httpx.Client(transport=transport, timeout=self._s.request_timeout) as client:
+                resp = client.post(self._s.chat_url, json=payload, headers=headers)
             resp.raise_for_status()
         except httpx.HTTPError as e:
             raise VisionError(f"Vision request to {self._s.chat_url} failed: {e}") from e
