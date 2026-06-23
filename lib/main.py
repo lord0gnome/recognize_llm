@@ -8,6 +8,7 @@ from typing import Annotated
 
 import job_queue
 import routes_backfill
+import routes_dashboard
 import routes_events
 import settings as settings_mod
 import settings_ui
@@ -40,6 +41,7 @@ APP = FastAPI(lifespan=lifespan)
 APP.add_middleware(AppAPIAuthMiddleware)
 APP.include_router(routes_events.router)
 APP.include_router(routes_backfill.router)
+APP.include_router(routes_dashboard.router)
 
 
 @APP.post("/describe_now")
@@ -81,6 +83,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 "recognize_llm_describe", "Describe with AI", "/describe_now",
                 mime="image", icon="img/icon.svg",
             )
+            nc.ui.top_menu.register("dashboard", "AI Queue", icon="img/icon.svg", admin_required=True)
             nc.occ_commands.register(
                 "recognize_llm:backfill",
                 "/occ/backfill",
@@ -98,6 +101,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             task_provider.unregister(nc)
             _unregister_events_listener(nc)
             nc.ui.files_dropdown_menu.unregister("recognize_llm_describe")
+            nc.ui.top_menu.unregister("dashboard")
             nc.occ_commands.unregister("recognize_llm:backfill")
             nc.log(LogLvl.INFO, "recognize_llm disabled")
     except Exception as e:

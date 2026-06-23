@@ -19,6 +19,8 @@ class Result:
     status: str  # "done" | "skipped" | "failed"
     caption: Caption | None = None
     reason: str = ""
+    name: str = ""
+    path: str = ""
 
 
 def caption_bytes(image: bytes, mimetype: str, settings: Settings) -> Caption:
@@ -46,4 +48,4 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     storage.write_results(nc, node, caption, settings)
     storage.set_marker(nc, node)
     nc.log(LogLvl.INFO, f"recognize_llm: tagged {node.user_path} with {caption.tags}")
-    return Result("done", caption=caption)
+    return Result("done", caption=caption, name=node.name, path=node.user_path)

@@ -7,6 +7,7 @@ never flooded. State lives on disk so the queue survives an exApp restart (resum
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -29,6 +30,9 @@ def _connect() -> sqlite3.Connection:
     return con
 
 
+_RECENT_LIMIT = 50
+
+
 def init_db() -> None:
     with _connect() as con:
         con.execute(
@@ -43,6 +47,20 @@ def init_db() -> None:
                 error     TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (user_id, file_id)
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recent_results (
+                file_id      INTEGER NOT NULL,
+                user_id      TEXT NOT NULL,
+                processed_at INTEGER NOT NULL,
+                name         TEXT NOT NULL DEFAULT '',
+                path         TEXT NOT NULL DEFAULT '',
+                description  TEXT NOT NULL DEFAULT '',
+                tags         TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (file_id)
             )
             """
         )
@@ -78,6 +96,42 @@ def status() -> dict:
         "failed": counts.get("failed", 0),
         "total": sum(counts.values()),
     }
+
+
+def record_recent(user_id: str, file_id: int, name: str, path: str, description: str, tags: list[str]) -> None:
+    with _connect() as con:
+        con.execute(
+            "INSERT OR REPLACE INTO recent_results "
+            "(file_id, user_id, processed_at, name, path, description, tags) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (file_id, user_id, int(time.time()), name, path, description, json.dumps(tags)),
+        )
+        con.execute(
+            "DELETE FROM recent_results WHERE file_id NOT IN "
+            "(SELECT file_id FROM recent_results ORDER BY processed_at DESC LIMIT ?)",
+            (_RECENT_LIMIT,),
+        )
+
+
+def get_recent(limit: int = 20) -> list[dict]:
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT file_id, user_id, processed_at, name, path, description, tags "
+            "FROM recent_results ORDER BY processed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "file_id": r[0],
+            "user_id": r[1],
+            "processed_at": r[2],
+            "name": r[3],
+            "path": r[4],
+            "description": r[5],
+            "tags": json.loads(r[6]),
+        }
+        for r in rows
+    ]
 
 
 def _claim() -> sqlite3.Row | None:
@@ -138,6 +192,12 @@ class Workers:
                     nc, row["user_id"], int(row["file_id"]), cfg, force=bool(row["force"])
                 )
                 _finish(row, "done" if res.status in ("done", "skipped") else "failed", res.reason)
+                if res.status == "done" and res.caption:
+                    record_recent(
+                        row["user_id"], int(row["file_id"]),
+                        res.name, res.path,
+                        res.caption.description, res.caption.tags,
+                    )
             except Exception as e:
                 retry = row["attempts"] + 1 < MAX_ATTEMPTS
                 _finish(row, "pending" if retry else "failed", str(e))
