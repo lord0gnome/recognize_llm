@@ -64,6 +64,12 @@ def init_db() -> None:
             )
             """
         )
+        # Any job left in 'processing' on startup is orphaned (container died mid-job).
+        # Reset them so workers pick them up again.
+        con.execute(
+            "UPDATE jobs SET status='pending', updated_at=? WHERE status='processing'",
+            (int(time.time()),),
+        )
 
 
 def enqueue(user_id: str, file_id: int, source: str = "manual", force: bool = False) -> None:
