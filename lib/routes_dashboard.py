@@ -13,7 +13,8 @@ router = APIRouter()
 
 _NC_URL = os.environ.get("NEXTCLOUD_URL", "").rstrip("/")
 _APP_ID = os.environ.get("APP_ID", "recognize_llm")
-_PROXY_BASE = f"{_NC_URL}/index.php/apps/app_api/proxy/{_APP_ID}"
+# AppAPI proxy route uses root='/proxy', so URL is /proxy/{appId}/... (not /apps/app_api/proxy/...)
+_PROXY_BASE = f"/proxy/{_APP_ID}"
 
 
 # ── JSON API ──────────────────────────────────────────────────────────────────
@@ -26,6 +27,39 @@ async def api_status() -> dict:
 @router.get("/dashboard/api/recent")
 async def api_recent() -> list:
     return job_queue.get_recent(20)
+
+
+# ── Iframe loader JS (injected into NC's embedded page via registered script) ─
+
+_LOADER_JS = """
+(function () {
+  var BASE_URL = window.location.origin;
+  function mount() {
+    var content = document.getElementById('content') || document.body;
+    var iframe = document.createElement('iframe');
+    iframe.src = BASE_URL + '/proxy/__APP_ID__/top_menu/dashboard';
+    iframe.style.cssText = 'width:100%;height:calc(100vh - 50px);border:none;display:block;background:#1a1b1e';
+    iframe.allow = 'same-origin';
+    content.innerHTML = '';
+    content.style.padding = '0';
+    content.appendChild(iframe);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', mount);
+  } else {
+    mount();
+  }
+})();
+"""
+
+
+from fastapi.responses import PlainTextResponse  # noqa: E402
+
+
+@router.get("/js/dashboard-loader.js", response_class=PlainTextResponse)
+async def dashboard_loader_js() -> PlainTextResponse:
+    js = _LOADER_JS.replace("__APP_ID__", _APP_ID)
+    return PlainTextResponse(js, media_type="application/javascript")
 
 
 # ── Dashboard HTML ────────────────────────────────────────────────────────────
