@@ -41,11 +41,15 @@ var API   = PROXY + '/dashboard/api';
 
 /* ── Scoped CSS ──────────────────────────────────────────────────────────── */
 var CSS = `
+/* NC's embedded page sets overflow:hidden on html/body — override it */
+html, body { overflow-y: auto !important; height: auto !important; }
+#content    { overflow-y: auto !important; height: auto !important; }
+
 #rlm-dash {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: #1a1b1e;
   color: #e0e0e0;
-  min-height: calc(100vh - 50px);
+  min-height: 100vh;
   padding: 24px;
   box-sizing: border-box;
 }
@@ -207,7 +211,15 @@ function mount() {
 
   var content = document.getElementById('content') || document.body;
   content.innerHTML = '';
-  content.style.cssText = 'padding:0;margin:0;';
+  content.style.padding = '0';
+  content.style.margin = '0';
+  content.style.overflowY = 'auto';
+  content.style.height = 'auto';
+  // NC sets overflow:hidden on html/body in its embedded page template
+  document.documentElement.style.overflowY = 'auto';
+  document.documentElement.style.height = 'auto';
+  document.body.style.overflowY = 'auto';
+  document.body.style.height = 'auto';
   content.appendChild(root);
 
   startPolling();
