@@ -52,6 +52,7 @@ html, body { overflow-y: auto !important; height: auto !important; }
   min-height: 100vh;
   padding: 24px;
   box-sizing: border-box;
+  overflow-y: scroll;
 }
 #rlm-dash *, #rlm-dash *::before, #rlm-dash *::after { box-sizing: border-box; }
 
