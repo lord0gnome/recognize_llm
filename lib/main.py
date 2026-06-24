@@ -86,7 +86,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             nc.ui.top_menu.register("dashboard", "AI Queue", icon="img/icon.svg", admin_required=True)
             nc.ocs("POST", "/ocs/v1.php/apps/app_api/api/v1/ui/script", json={
                 "type": "top_menu", "name": "dashboard",
-                "path": "js/dashboard-loader.js", "afterAppId": "",
+                "path": "js/dashboard-loader", "afterAppId": "",
             })
             nc.occ_commands.register(
                 "recognize_llm:backfill",
@@ -107,7 +107,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             nc.ui.files_dropdown_menu.unregister("recognize_llm_describe")
             nc.ui.top_menu.unregister("dashboard")
             nc.ocs("DELETE", "/ocs/v1.php/apps/app_api/api/v1/ui/script", params={
-                "type": "top_menu", "name": "dashboard", "path": "js/dashboard-loader.js",
+                "type": "top_menu", "name": "dashboard", "path": "js/dashboard-loader",
             })
             nc.occ_commands.unregister("recognize_llm:backfill")
             nc.log(LogLvl.INFO, "recognize_llm disabled")

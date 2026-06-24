@@ -13,8 +13,7 @@ router = APIRouter()
 
 _NC_URL = os.environ.get("NEXTCLOUD_URL", "").rstrip("/")
 _APP_ID = os.environ.get("APP_ID", "recognize_llm")
-# AppAPI proxy route uses root='/proxy', so URL is /proxy/{appId}/... (not /apps/app_api/proxy/...)
-_PROXY_BASE = f"/proxy/{_APP_ID}"
+_PROXY_BASE = f"{_NC_URL}/index.php/apps/app_api/proxy/{_APP_ID}"
 
 
 # ── JSON API ──────────────────────────────────────────────────────────────────
@@ -33,11 +32,10 @@ async def api_recent() -> list:
 
 _LOADER_JS = """
 (function () {
-  var BASE_URL = window.location.origin;
   function mount() {
     var content = document.getElementById('content') || document.body;
     var iframe = document.createElement('iframe');
-    iframe.src = BASE_URL + '/proxy/__APP_ID__/top_menu/dashboard';
+    iframe.src = window.location.origin + '/index.php/apps/app_api/proxy/__APP_ID__/top_menu/dashboard';
     iframe.style.cssText = 'width:100%;height:calc(100vh - 50px);border:none;display:block;background:#1a1b1e';
     iframe.allow = 'same-origin';
     content.innerHTML = '';
