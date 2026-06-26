@@ -208,8 +208,6 @@ function mount() {
 
   var content = document.getElementById('content') || document.body;
   content.innerHTML = '';
-  content.style.padding = '0';
-  content.style.margin = '0';
   // NC's layout constrains #content to the viewport below the topbar (overflow:hidden).
   // height:100% doesn't resolve if #content has no explicit height (flex/position sizing).
   // Measure the real available height from #content's top edge to the viewport bottom,
