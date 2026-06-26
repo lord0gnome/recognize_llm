@@ -41,18 +41,14 @@ var API   = PROXY + '/dashboard/api';
 
 /* ── Scoped CSS ──────────────────────────────────────────────────────────── */
 var CSS = `
-/* NC's embedded page sets overflow:hidden on html/body — override it */
-html, body { overflow-y: auto !important; height: auto !important; }
-#content    { overflow-y: auto !important; height: auto !important; }
-
 #rlm-dash {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: #1a1b1e;
   color: #e0e0e0;
-  min-height: 100vh;
   padding: 24px;
   box-sizing: border-box;
-  overflow-y: scroll;
+  height: calc(100vh - var(--header-height, 50px));
+  overflow-y: auto;
 }
 #rlm-dash *, #rlm-dash *::before, #rlm-dash *::after { box-sizing: border-box; }
 
@@ -214,13 +210,13 @@ function mount() {
   content.innerHTML = '';
   content.style.padding = '0';
   content.style.margin = '0';
-  content.style.overflowY = 'auto';
-  content.style.height = 'auto';
-  // NC sets overflow:hidden on html/body in its embedded page template
-  document.documentElement.style.overflowY = 'auto';
-  document.documentElement.style.height = 'auto';
-  document.body.style.overflowY = 'auto';
-  document.body.style.height = 'auto';
+  // NC's layout constrains #content to the viewport below the topbar (overflow:hidden).
+  // height:100% doesn't resolve if #content has no explicit height (flex/position sizing).
+  // Measure the real available height from #content's top edge to the viewport bottom,
+  // then size #rlm-dash to exactly that so overflow-y:auto has a concrete container to scroll within.
+  var availH = window.innerHeight - content.getBoundingClientRect().top;
+  root.style.height = availH + 'px';
+  root.style.overflowY = 'auto';
   content.appendChild(root);
 
   startPolling();
