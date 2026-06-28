@@ -91,9 +91,14 @@ def enqueue(user_id: str, file_id: int, source: str = "manual", force: bool = Fa
         )
 
 
-def status() -> dict:
+def status(user_id: str | None = None) -> dict:
     with _connect() as con:
-        rows = con.execute("SELECT status, COUNT(*) c FROM jobs GROUP BY status").fetchall()
+        if user_id:
+            rows = con.execute(
+                "SELECT status, COUNT(*) c FROM jobs WHERE user_id=? GROUP BY status", (user_id,)
+            ).fetchall()
+        else:
+            rows = con.execute("SELECT status, COUNT(*) c FROM jobs GROUP BY status").fetchall()
     counts = {r["status"]: r["c"] for r in rows}
     return {
         "pending": counts.get("pending", 0),
@@ -119,23 +124,37 @@ def record_recent(user_id: str, file_id: int, name: str, path: str, description:
         )
 
 
-def retry_failed() -> int:
-    """Reset all failed jobs to pending. Returns the number of jobs reset."""
+def retry_failed(user_id: str | None = None) -> int:
+    """Reset failed jobs to pending. Returns the number of jobs reset."""
     with _connect() as con:
-        cur = con.execute(
-            "UPDATE jobs SET status='pending', attempts=0, error='', updated_at=? WHERE status='failed'",
-            (int(time.time()),),
-        )
+        if user_id:
+            cur = con.execute(
+                "UPDATE jobs SET status='pending', attempts=0, error='', updated_at=? "
+                "WHERE status='failed' AND user_id=?",
+                (int(time.time()), user_id),
+            )
+        else:
+            cur = con.execute(
+                "UPDATE jobs SET status='pending', attempts=0, error='', updated_at=? WHERE status='failed'",
+                (int(time.time()),),
+            )
         return cur.rowcount
 
 
-def get_recent(limit: int = 20) -> list[dict]:
+def get_recent(limit: int = 20, user_id: str | None = None) -> list[dict]:
     with _connect() as con:
-        rows = con.execute(
-            "SELECT file_id, user_id, processed_at, name, path, description, tags "
-            "FROM recent_results ORDER BY processed_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if user_id:
+            rows = con.execute(
+                "SELECT file_id, user_id, processed_at, name, path, description, tags "
+                "FROM recent_results WHERE user_id=? ORDER BY processed_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+        else:
+            rows = con.execute(
+                "SELECT file_id, user_id, processed_at, name, path, description, tags "
+                "FROM recent_results ORDER BY processed_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
     return [
         {
             "file_id": r[0],

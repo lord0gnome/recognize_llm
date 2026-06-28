@@ -83,7 +83,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 "recognize_llm_describe", "Describe with AI", "/describe_now",
                 mime="image", icon="img/icon.svg",
             )
-            nc.ui.top_menu.register("dashboard", "AI Queue", icon="img/icon.svg", admin_required=True)
+            nc.ui.top_menu.register("dashboard", "AI Queue", icon="img/icon.svg")
             nc.ocs("POST", "/ocs/v1.php/apps/app_api/api/v1/ui/script", json={
                 "type": "top_menu", "name": "dashboard",
                 "path": "js/dashboard-loader", "afterAppId": "",

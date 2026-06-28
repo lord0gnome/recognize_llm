@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter
+from typing import Annotated
+
+from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse, PlainTextResponse
+from nc_py_api import NextcloudApp
+from nc_py_api.ex_app import nc_app
 
 import job_queue
 
@@ -19,18 +23,18 @@ _PROXY_BASE = f"{_NC_URL}/index.php/apps/app_api/proxy/{_APP_ID}"
 # ── JSON API ──────────────────────────────────────────────────────────────────
 
 @router.get("/dashboard/api/status")
-async def api_status() -> dict:
-    return job_queue.status()
+async def api_status(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
+    return job_queue.status(user_id=nc.user or None)
 
 
 @router.get("/dashboard/api/recent")
-async def api_recent() -> list:
-    return job_queue.get_recent(20)
+async def api_recent(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> list:
+    return job_queue.get_recent(20, user_id=nc.user or None)
 
 
 @router.post("/dashboard/api/retry-failed")
-async def api_retry_failed() -> dict:
-    count = job_queue.retry_failed()
+async def api_retry_failed(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
+    count = job_queue.retry_failed(user_id=nc.user or None)
     return {"reset": count}
 
 
