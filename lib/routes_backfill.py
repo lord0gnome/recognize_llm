@@ -52,10 +52,21 @@ def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
                 break
             _state["current_user"] = uid
             nc.set_user(uid)
-            for node in nc.files.listdir(path or "", depth=-1):
+            nodes = nc.files.listdir(path or "", depth=-1)
+            # Mounted directories are received shares or external storage — skip their contents.
+            # Only the mount-point directory itself carries the "M" permission flag, so we
+            # collect those roots first and then exclude any file path that falls under them.
+            mounted_roots = {
+                node.user_path.rstrip("/") + "/"
+                for node in nodes
+                if node.is_dir and node.is_mounted
+            }
+            for node in nodes:
                 if not _state["running"]:
                     break
                 if node.is_dir or not (node.info.mimetype or "").startswith("image/"):
+                    continue
+                if mounted_roots and any(node.user_path.startswith(m) for m in mounted_roots):
                     continue
                 job_queue.enqueue(uid, node.info.fileid, source="backfill")
                 _state["enqueued"] += 1
