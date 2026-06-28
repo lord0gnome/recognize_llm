@@ -36,6 +36,11 @@ def _ensure_tag(nc: NextcloudApp, name: str):
 
 
 def write_results(nc: NextcloudApp, node: FsNode, caption: Caption, settings: Settings) -> None:
+    # System tag creation requires admin privileges; non-admin users get a 403 on POST /systemtags.
+    # Drop to app-level auth (empty user) for all tag operations, then restore the file owner so
+    # the DAV property writes use the correct user-scoped path (/files/{owner}/…).
+    file_owner = nc.user
+    nc.set_user("")
     for name in caption.tags[: settings.max_tags]:
         tag = _ensure_tag(nc, name)
         try:
@@ -43,6 +48,7 @@ def write_results(nc: NextcloudApp, node: FsNode, caption: Caption, settings: Se
         except NextcloudException as e:
             if e.status_code != 409:  # 409 = already assigned, treat as idempotent
                 raise
+    nc.set_user(file_owner)
 
     if caption.description:
         dav.set_props(nc, node, {dav.PROP_DESCRIPTION: caption.description})
