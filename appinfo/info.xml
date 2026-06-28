@@ -37,6 +37,38 @@ modified. Also registered as a TaskProcessing provider so other Nextcloud AI fea
 			<value>AI_PROVIDERS</value>
 		</scopes>
 		<routes>
+			<!-- Dashboard UI and API — accessible to all authenticated users -->
+			<route>
+				<url>^/top_menu/dashboard$</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/js/dashboard-loader\.js$</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/dashboard/api/status$</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/dashboard/api/recent$</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/dashboard/api/retry-failed$</url>
+				<verb>POST</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<!-- Everything else (backfill, events, OCC, settings) requires admin -->
 			<route>
 				<url>.*</url>
 				<verb>GET,POST,PUT,DELETE</verb>
