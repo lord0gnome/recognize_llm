@@ -28,6 +28,12 @@ async def api_recent() -> list:
     return job_queue.get_recent(20)
 
 
+@router.post("/dashboard/api/retry-failed")
+async def api_retry_failed() -> dict:
+    count = job_queue.retry_failed()
+    return {"reset": count}
+
+
 # ── Loader JS — runs inline in NC's embedded page, no iframe needed ───────────
 # NC sets frame-ancestors 'none' on all proxy responses, so we can't use an
 # iframe. Instead this script injects the full dashboard UI directly into #content.
@@ -36,8 +42,9 @@ _LOADER_JS = r"""
 (function () {
 'use strict';
 
-var PROXY = window.location.origin + '/index.php/apps/app_api/proxy/__APP_ID__';
-var API   = PROXY + '/dashboard/api';
+var PROXY  = window.location.origin + '/index.php/apps/app_api/proxy/__APP_ID__';
+var API    = PROXY + '/dashboard/api';
+var _poll  = null;
 
 /* ── Scoped CSS ──────────────────────────────────────────────────────────── */
 var CSS = `
@@ -167,6 +174,13 @@ var CSS = `
   100% { opacity:1; transform:scale(1); }
 }
 #rlm-dash .ctime { font-size:0.65rem; color:#444; margin-top:2px; }
+#rlm-dash .rbtn {
+  margin-top:8px; font-size:0.65rem; padding:3px 12px; border-radius:20px;
+  background:rgba(255,107,107,0.12); color:#ff6b6b; border:1px solid rgba(255,107,107,0.3);
+  cursor:pointer; transition:all 0.2s;
+}
+#rlm-dash .rbtn:hover:not(:disabled) { background:rgba(255,107,107,0.28); }
+#rlm-dash .rbtn:disabled { opacity:0.5; cursor:default; }
 #rlm-dash .empty {
   grid-column:1/-1; text-align:center; padding:48px; color:#444; font-size:0.9rem;
 }
@@ -184,7 +198,9 @@ var HTML = `
   <div class="stat pending">  <div class="snum" id="rlm-pending">—</div>  <div class="slbl">Pending</div></div>
   <div class="stat processing"><div class="snum" id="rlm-processing">—</div><div class="slbl">Processing</div></div>
   <div class="stat done">     <div class="snum" id="rlm-done">—</div>     <div class="slbl">Done</div></div>
-  <div class="stat failed">   <div class="snum" id="rlm-failed">—</div>   <div class="slbl">Failed</div></div>
+  <div class="stat failed">   <div class="snum" id="rlm-failed">—</div>   <div class="slbl">Failed</div>
+    <button id="rlm-retry" class="rbtn" style="display:none">Retry all</button>
+  </div>
 </div>
 <div class="pwrap">
   <div class="plbl"><span id="rlm-plbl">Loading…</span><span id="rlm-ppct">—</span></div>
@@ -217,6 +233,9 @@ function mount() {
   root.style.overflowY = 'auto';
   content.appendChild(root);
 
+  var retryBtn = document.getElementById('rlm-retry');
+  if (retryBtn) retryBtn.addEventListener('click', retryFailed);
+
   startPolling();
 }
 
@@ -242,6 +261,25 @@ function relTime(ts) {
 }
 function fmt(n) { return n.toLocaleString(); }
 
+/* ── Retry failed ────────────────────────────────────────────────────────── */
+function retryFailed() {
+  var btn = document.getElementById('rlm-retry');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  fetch(API + '/retry-failed', {method:'POST', credentials:'same-origin'})
+    .then(function(r) { return r.json(); })
+    .then(function() {
+      btn.disabled = false;
+      btn.textContent = 'Retry all';
+      if (_poll) _poll();
+    })
+    .catch(function() {
+      btn.disabled = false;
+      btn.textContent = 'Retry all';
+    });
+}
+
 /* ── Stats update ────────────────────────────────────────────────────────── */
 function updateStats(s) {
   ['pending','processing','done','failed'].forEach(function(k) {
@@ -263,6 +301,8 @@ function updateStats(s) {
   if (pp) pp.textContent = pct + '%';
   var pl = document.getElementById('rlm-plbl');
   if (pl) pl.textContent = fmt(done) + ' / ' + fmt(total) + ' images processed';
+  var rb = document.getElementById('rlm-retry');
+  if (rb) rb.style.display = (s.failed || 0) > 0 ? 'block' : 'none';
 }
 
 /* ── Cards ───────────────────────────────────────────────────────────────── */
@@ -363,6 +403,7 @@ function startPolling() {
     });
   }
 
+  _poll = poll;
   poll();
   setInterval(poll, 4000);
   setInterval(function() {

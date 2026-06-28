@@ -119,6 +119,16 @@ def record_recent(user_id: str, file_id: int, name: str, path: str, description:
         )
 
 
+def retry_failed() -> int:
+    """Reset all failed jobs to pending. Returns the number of jobs reset."""
+    with _connect() as con:
+        cur = con.execute(
+            "UPDATE jobs SET status='pending', attempts=0, error='', updated_at=? WHERE status='failed'",
+            (int(time.time()),),
+        )
+        return cur.rowcount
+
+
 def get_recent(limit: int = 20) -> list[dict]:
     with _connect() as con:
         rows = con.execute(
