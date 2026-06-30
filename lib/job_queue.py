@@ -13,7 +13,6 @@ import sqlite3
 import threading
 import time
 
-import processor
 import settings as settings_mod
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl, persistent_storage
@@ -61,6 +60,31 @@ def init_db() -> None:
                 description  TEXT NOT NULL DEFAULT '',
                 tags         TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (file_id)
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_embeddings (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    TEXT NOT NULL,
+                file_id    INTEGER NOT NULL,
+                face_index INTEGER NOT NULL,
+                embedding  BLOB NOT NULL,
+                cluster_id INTEGER NOT NULL DEFAULT -1,
+                created_at INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(user_id, file_id, face_index)
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_clusters (
+                user_id       TEXT NOT NULL,
+                cluster_id    INTEGER NOT NULL,
+                tag_name      TEXT NOT NULL,
+                file_ids_json TEXT NOT NULL DEFAULT '[]',
+                PRIMARY KEY (user_id, cluster_id)
             )
             """
         )
@@ -212,6 +236,7 @@ class Workers:
         self._stop.set()
 
     def _loop(self) -> None:
+        import processor  # lazy import — breaks the job_queue → processor → face_pipeline → job_queue cycle
         nc = NextcloudApp()
         idle = 0.0
         while not self._stop.is_set():

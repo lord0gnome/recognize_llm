@@ -80,14 +80,16 @@ class VisionClient:
     def __init__(self, settings: Settings):
         self._s = settings
 
-    def caption(self, image: bytes, mimetype: str) -> Caption:
+    def caption(self, image: bytes, mimetype: str, is_video: bool = False) -> Caption:
+        from settings import DEFAULT_VIDEO_PROMPT_PREFIX
+        prompt = (DEFAULT_VIDEO_PROMPT_PREFIX + self._s.prompt) if is_video else self._s.prompt
         payload = {
             "messages": [
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": self._s.prompt},
-                        {"type": "image_url", "image_url": {"url": _data_url(image, mimetype)}},
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": _data_url(image, "image/jpeg")}},
                     ],
                 }
             ],

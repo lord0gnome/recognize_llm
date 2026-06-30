@@ -6,6 +6,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
+# Point InsightFace at the persistent volume so models survive restarts.
+# Must be set before any face_pipeline import.
+from nc_py_api.ex_app import persistent_storage as _ps
+os.environ.setdefault("INSIGHTFACE_HOME", _ps())
+
 import job_queue
 import routes_backfill
 import routes_dashboard
@@ -95,7 +100,16 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                     {"name": "users", "shortcut": "u", "mode": "optional", "description": "Comma-separated user IDs to scan (default: all users)", "default": ""},
                     {"name": "path",  "shortcut": "p", "mode": "optional", "description": "Restrict scan to this folder path (default: all files)",  "default": ""},
                 ],
-                description="Enqueue existing images for AI tagging and description.",
+                description="Enqueue existing images and videos for AI tagging and description.",
+            )
+            nc.occ_commands.register(
+                "recognize_llm:cluster-faces",
+                "/occ/cluster-faces",
+                options=[
+                    {"name": "users",      "shortcut": "u", "mode": "optional", "description": "Comma-separated user IDs to cluster (default: all users)", "default": ""},
+                    {"name": "min-photos", "shortcut": "m", "mode": "optional", "description": "Minimum photos to form a person cluster (default: 3)",     "default": "3"},
+                ],
+                description="Cluster detected faces and assign person tags to photos.",
             )
             workers.start(cfg.concurrency)
             provider_loop.start()
@@ -110,6 +124,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 "type": "top_menu", "name": "dashboard", "path": "js/dashboard-loader",
             })
             nc.occ_commands.unregister("recognize_llm:backfill")
+            nc.occ_commands.unregister("recognize_llm:cluster-faces")
             nc.log(LogLvl.INFO, "recognize_llm disabled")
     except Exception as e:
         return str(e)

@@ -11,6 +11,9 @@ from dataclasses import dataclass
 
 from nc_py_api import NextcloudApp
 
+DEFAULT_VIDEO_PROMPT_PREFIX = """\
+This is a video represented as a 3×3 grid of frames sampled from start to end (left-to-right, top-to-bottom). """
+
 DEFAULT_PROMPT = """\
 You are a photo library metadata assistant. Examine the image and respond with ONLY a JSON object — no markdown, no text outside the JSON.
 
@@ -39,10 +42,13 @@ _KEYS: dict[str, tuple[str, str]] = {
     "prompt": ("LLAMA_PROMPT", DEFAULT_PROMPT),
     "max_tags": ("MAX_TAGS", "8"),
     "mimetypes": ("MIMETYPES", "image/jpeg,image/png,image/webp,image/heic,image/heif,image/gif,image/tiff"),
+    "video_mimetypes": ("VIDEO_MIMETYPES", "video/mp4,video/mpeg,video/quicktime,video/x-msvideo,video/x-matroska,video/webm,video/ogg"),
     "concurrency": ("CONCURRENCY", "1"),
     "request_timeout": ("REQUEST_TIMEOUT", "180"),
     "write_comment": ("WRITE_COMMENT", "yes"),
     "max_tokens": ("MAX_TOKENS", "1024"),
+    "face_clustering": ("FACE_CLUSTERING", "yes"),
+    "face_min_samples": ("FACE_MIN_SAMPLES", "3"),
 }
 
 
@@ -54,10 +60,13 @@ class Settings:
     prompt: str
     max_tags: int
     mimetypes: list[str]
+    video_mimetypes: list[str]
     concurrency: int
     request_timeout: int
     write_comment: bool
     max_tokens: int
+    face_clustering: bool
+    face_min_samples: int
 
     @property
     def chat_url(self) -> str:
@@ -71,6 +80,9 @@ class Settings:
 
     def mimetype_allowed(self, mimetype: str) -> bool:
         return bool(mimetype) and mimetype.lower() in self.mimetypes
+
+    def video_mimetype_allowed(self, mimetype: str) -> bool:
+        return bool(mimetype) and mimetype.lower() in self.video_mimetypes
 
 
 def _raw(nc: NextcloudApp) -> dict[str, str]:
@@ -94,8 +106,11 @@ def load(nc: NextcloudApp) -> Settings:
         prompt=r["prompt"],
         max_tags=max(1, int(r["max_tags"] or 8)),
         mimetypes=[m.strip().lower() for m in r["mimetypes"].split(",") if m.strip()],
+        video_mimetypes=[m.strip().lower() for m in r["video_mimetypes"].split(",") if m.strip()],
         concurrency=max(1, int(r["concurrency"] or 1)),
         request_timeout=max(10, int(r["request_timeout"] or 180)),
         write_comment=str(r["write_comment"]).lower() in ("1", "yes", "true", "on"),
         max_tokens=max(64, int(r["max_tokens"] or 1024)),
+        face_clustering=str(r["face_clustering"]).lower() in ("1", "yes", "true", "on"),
+        face_min_samples=max(2, int(r["face_min_samples"] or 3)),
     )

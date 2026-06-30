@@ -1,7 +1,7 @@
-"""Admin-triggered, resumable backfill of existing image libraries.
+"""Admin-triggered, resumable backfill of existing image and video libraries.
 
-Crawls each in-scope user's files for images and enqueues them. The queue's per-file etag marker
-makes re-runs cheap (already-processed, unchanged files are skipped by the worker).
+Crawls each in-scope user's files for images and videos and enqueues them. The queue's per-file
+etag marker makes re-runs cheap (already-processed, unchanged files are skipped by the worker).
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ import threading
 from typing import Annotated
 
 import job_queue
+import settings as settings_mod
 from fastapi import APIRouter, BackgroundTasks, Depends
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl, nc_app
@@ -47,6 +48,8 @@ def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
     with _lock:
         _state.update(running=True, enqueued=0, users_total=len(users), users_done=0, current_user="", error="")
     try:
+        cfg = settings_mod.load(nc)
+        allowed_mimes = set(cfg.mimetypes) | set(cfg.video_mimetypes)
         for uid in users:
             if not _state["running"]:
                 break
@@ -64,14 +67,14 @@ def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
             for node in nodes:
                 if not _state["running"]:
                     break
-                if node.is_dir or not (node.info.mimetype or "").startswith("image/"):
+                if node.is_dir or (node.info.mimetype or "").lower() not in allowed_mimes:
                     continue
                 if mounted_roots and any(node.user_path.startswith(m) for m in mounted_roots):
                     continue
                 job_queue.enqueue(uid, node.info.fileid, source="backfill")
                 _state["enqueued"] += 1
             _state["users_done"] += 1
-        nc.log(LogLvl.INFO, f"recognize_llm: backfill enqueued {_state['enqueued']} images")
+        nc.log(LogLvl.INFO, f"recognize_llm: backfill enqueued {_state['enqueued']} files")
     except Exception as e:
         _state["error"] = str(e)
         nc.log(LogLvl.ERROR, f"recognize_llm: backfill failed: {e}")
@@ -127,3 +130,24 @@ def occ_backfill(
         return {"status": "already_running", **_state}
     background_tasks.add_task(_crawl, nc, users, path)
     return {"status": "started", "users": users, "path": path or "/"}
+
+
+@router.post("/occ/cluster-faces")
+def occ_cluster_faces(
+    req: OccBackfillRequest,
+    nc: Annotated[NextcloudApp, Depends(nc_app)],
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """OCC callback: ``occ recognize_llm:cluster-faces [--users alice,bob] [--min-photos 3]``."""
+    import face_pipeline
+    import settings as settings_mod
+
+    options = req.occ.get("options") or {}
+    raw_users = options.get("users") or ""
+    users = [u.strip() for u in raw_users.split(",") if u.strip()] if raw_users else _resolve_users(nc)
+    if not users:
+        return {"status": "no_users"}
+    cfg = settings_mod.load(nc)
+    min_samples = max(2, int(options.get("min-photos") or cfg.face_min_samples))
+    background_tasks.add_task(face_pipeline.cluster_and_tag, nc, users, min_samples)
+    return {"status": "started", "users": users, "min_photos": min_samples}
