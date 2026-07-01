@@ -14,6 +14,7 @@ from nc_py_api import NextcloudApp, FsNode
 from nc_py_api.files._files import dav_get_obj_path
 
 NS = "https://github.com/lord0gnome/recognize_llm/ns"
+NC_NS = "http://owncloud.org/ns"
 PROP_DESCRIPTION = "description"
 PROP_ETAG = "processed-etag"
 
@@ -54,6 +55,18 @@ def get_props(nc: NextcloudApp, node: FsNode, names: list[str]) -> dict[str, str
                 out[name] = el.text
                 break
     return out
+
+
+def set_nc_note(nc: NextcloudApp, node: FsNode, note: str) -> None:
+    """Write to Nextcloud's built-in oc:note property (visible in Files sidebar Details tab)."""
+    body = (
+        '<?xml version="1.0"?>'
+        f'<d:propertyupdate xmlns:d="DAV:" xmlns:oc="{NC_NS}">'
+        f"<d:set><d:prop><oc:note>{escape(note)}</oc:note></d:prop></d:set>"
+        "</d:propertyupdate>"
+    )
+    resp = nc._session.adapter_dav.request("PROPPATCH", _obj_path(nc, node), data=body)
+    resp.raise_for_status()
 
 
 def add_comment(nc: NextcloudApp, file_id: int, message: str) -> None:

@@ -177,6 +177,36 @@ occ app_api:app:register recognize_llm dsp_http --info-xml /tmp/recognize_llm.xm
 
 ---
 
+## Infrastructure (`~/infra/` — `podman play kube`)
+
+The nc-dsp proxy and the ExApp are deployed via `podman play kube` manifests in `~/infra/`.
+The systemd user service `recognize-llm-stack.service` runs `~/infra/deploy.sh` on every boot.
+
+```
+~/infra/
+  nc-dsp.yaml            # Docker Socket Proxy pod
+  recognize-llm.yaml     # ExApp pod (APP_SECRET kept as PLACEHOLDER — injected at deploy time)
+  deploy.sh              # migrate + deploy both pods; installs systemd service on first run
+  teardown.sh            # stop both pods (called by systemd ExecStop)
+```
+
+**Deploy / update after a build:**
+```bash
+make build               # rebuild the local image
+~/infra/deploy.sh        # redeploy with the latest APP_SECRET from DB
+```
+
+**Key non-obvious requirements (NC 34 / podman):**
+
+| Requirement | Why |
+|---|---|
+| `--network podman-default-kube-network:alias=recognize_llm` | AppAPI's `DockerActions::resolveExAppUrl()` always uses the `APP_ID` (`recognize_llm`) as the HTTP hostname. Without this DNS alias the ExApp is unreachable. |
+| NC cron every minute | NC is in `cron` mode; without `cron.php` firing, AppAPI background jobs (event dispatch) never run. Crontab: `* * * * * podman exec -u www-data nextcloud-app php /var/www/html/cron.php` |
+| `init: 100` in `oc_ex_apps.status` | AppAPI withholds events while init < 100. If `set_init_status(100)` fails on startup (429 rate-limiting), fix manually in the DB (see troubleshooting below). |
+| APP_SECRET must match DB | AppAPI rotates the secret in `oc_ex_apps.secret`. `deploy.sh` reads the current value from DB before each deploy; re-running it fixes 401 errors after AppAPI touched the container. |
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
@@ -184,6 +214,9 @@ occ app_api:app:register recognize_llm dsp_http --info-xml /tmp/recognize_llm.xm
 | `Failed to enable ExApp` / silent enable failure / 996 on `POST /api/v1/events_listener` | **app_api ships no events_listener implementation (CONFIRMED on app_api 33.0.0).** Upload events can't register. The captured fix + one-command restore are in the repo: **`appapi-patches/app_api-33.0.0/` → `./apply.sh [nc-container]`**. **Re-apply after every `occ app:update app_api`** (it overwrites the files). Backfill + provider work without this; only new-upload events break. |
 | `Failed to pull image … 403/500` | Image not pullable: make the GHCR package public, or `podman login ghcr.io` on the host. Confirm `<registry>/<image>:<tag>` in info.xml matches what you pushed. |
 | Heartbeat fails / NC hits `localhost:23000` | Daemon missing `--net`; exApp landed on the wrong network. Re-register the daemon with `--net=<your network>` and redeploy. |
+| Events not delivered after reboot | Check: (1) `systemctl --user status recognize-llm-stack` is active; (2) NC cron is firing — `podman exec nextcloud-app php /var/www/html/cron.php`; (3) `recognize_llm` resolves from NC — `podman exec nextcloud-app getent hosts recognize_llm`. |
+| 401 Unauthorized on all ExApp calls | APP_SECRET drifted — AppAPI rotated it. Run `~/infra/deploy.sh` to re-sync and redeploy. |
+| `init: 0` — events never dispatched | AppAPI blocked delivery; init never reached 100 (nc_py_api hit 429 rate-limit on startup). Fix: `podman exec nextcloud-db mysql -u lord0gnome -pwXdgu2uynHJOxoDjqBS2 nextcloud -e "UPDATE oc_ex_apps SET status=JSON_SET(status,'$.init',100,'$.action','none') WHERE appid='recognize_llm';"` |
 | exApp can't reach llama (`Connection refused`) | Use `host.containers.internal`; if llama is on the LAN, open the host firewall for the Podman subnet. `/v1/models` open but completions `401` → set `api_key`. |
 | ExApps admin page 500 `undefined method` | Only on NC **34 dev** with old app_api — not expected on stable. See the dev notes if you ever hit it. |
 | Provider/task-type missing | Check `occ` taskprocessing task types; re-enable the app to re-run registration. |

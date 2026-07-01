@@ -1,7 +1,7 @@
 """Write generated metadata back into Nextcloud.
 
 - tags        -> Nextcloud system (collaborative) tags, searchable/filterable in Files
-- description -> dead DAV property (machine-readable) + optional user-visible comment
+- description -> oc:note (visible in NC Files sidebar) + optional user comment
 - marker      -> dead DAV property holding the etag processed, so backfill skips unchanged files
 """
 
@@ -47,7 +47,10 @@ def write_results(nc: NextcloudApp, node: FsNode, caption: Caption, settings: Se
                 raise
 
     if caption.description:
-        dav.set_props(nc, node, {dav.PROP_DESCRIPTION: caption.description})
+        try:
+            dav.set_nc_note(nc, node, caption.description)
+        except Exception as e:
+            nc.log(LogLvl.WARNING, f"recognize_llm: could not set note on {node.user_path}: {e}")
         if settings.write_comment:
             try:
                 dav.add_comment(nc, node.info.fileid, caption.description)

@@ -428,6 +428,7 @@ if (document.readyState === 'loading') {
 """
 
 
+@router.get("/js/dashboard-loader", response_class=PlainTextResponse)
 @router.get("/js/dashboard-loader.js", response_class=PlainTextResponse)
 async def dashboard_loader_js() -> PlainTextResponse:
     js = _LOADER_JS.replace("__APP_ID__", _APP_ID)

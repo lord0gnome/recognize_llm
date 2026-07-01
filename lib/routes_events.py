@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import os
 import job_queue
-from fastapi import APIRouter, responses
-from nc_py_api.ex_app.defs import FileSystemEventNotification
+from fastapi import APIRouter, Request, responses
 
 router = APIRouter()
 
@@ -24,12 +23,18 @@ _MEDIA_EXTENSIONS = {
 
 
 @router.post("/events/node")
-async def on_node_event(event: FileSystemEventNotification) -> responses.Response:
-    target = event.event_data.target
-    if target.fileType.lower() == "file":
-        mime = target.mime.lower()
-        mime_ok = mime.startswith("image/") or mime.startswith("video/")
-        ext_ok = os.path.splitext(target.name.lower())[1] in _MEDIA_EXTENSIONS
-        if mime_ok or ext_ok:
-            job_queue.enqueue(target.userId, target.fileId, source="event")
+async def on_node_event(request: Request) -> responses.Response:
+    # Parse raw JSON — tolerates schema drift between NC/AppAPI versions (e.g. favorite: bool vs str).
+    try:
+        body = await request.json()
+        target = body.get("event_data", {}).get("target", {})
+        if target.get("fileType", "").lower() == "file":
+            mime = (target.get("mime") or "").lower()
+            name = target.get("name") or ""
+            mime_ok = mime.startswith("image/") or mime.startswith("video/")
+            ext_ok = os.path.splitext(name.lower())[1] in _MEDIA_EXTENSIONS
+            if mime_ok or ext_ok:
+                job_queue.enqueue(target["userId"], int(target["fileId"]), source="event")
+    except Exception:
+        pass
     return responses.Response()
