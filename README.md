@@ -98,8 +98,12 @@ make test       # python -m pytest tests/
 - [x] M3 resumable backfill
 - [x] M4 OCC command (`occ recognize_llm:backfill`) — no more manual curl
 - [x] M5 admin settings UI, `max_tokens` config, improved default prompt
-- [ ] M6 TaskProcessing input-file fetch — verify `tasks_provider/{taskId}/file/{fileId}` against the
-      running server (see note in `lib/task_provider.py`)
+- [x] M6 TaskProcessing input-file fetch — verified `tasks_provider/{taskId}/file/{fileId}` against
+      the running server (NC 34 / app_api 34.0.0). Found and fixed a real bug along the way: the
+      custom task type's shape entries must use the key `shape_type`, not `type`
+      (`TaskProcessingService::getAnonymousTaskType()` throws on `type`, which silently drops the
+      whole task type from `getAvailableTaskTypes()` — no task types show up at all in that case,
+      not just ours). See `lib/task_provider.py`.
 - [ ] M7 **Face detection and person grouping**
   - Detect faces in images and extract embeddings (dedicated face-embedding model, e.g. InsightFace/ArcFace)
   - Cluster embeddings across the library to identify unique individuals

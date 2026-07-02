@@ -18,19 +18,23 @@ from nc_py_api.ex_app.providers.task_processing import ShapeType, TaskProcessing
 PROVIDER_ID = "recognize_llm"
 TASK_TYPE_ID = "recognize_llm:image2text"
 
-# Built as a plain dict (not nc_py_api's TaskType dataclass) because this app_api build reads each
-# shape's enum under the key "type", while nc_py_api 0.30.x serializes it as "shape_type".
+# Built as a plain dict (not nc_py_api's TaskType dataclass): app_api 34's
+# TaskProcessingService::getAnonymousTaskType() reads each shape's enum under the key "shape_type"
+# (confirmed from the running server's exception log: "Undefined array key \"shape_type\"" when a
+# "type" key was used instead — that mismatch silently drops the custom task type from
+# Manager::getAvailableTaskTypes(), which also empties tasktypes for every OTHER provider since the
+# whole request throws).
 # register() passes a dict straight through (RootModel(dict).model_dump()), so the keys land as-is.
 _TASK_TYPE = {
     "id": TASK_TYPE_ID,
     "name": "Describe image (local vision)",
     "description": "Generate a description and tags for an image using a local llama.cpp vision model",
     "input_shape": [
-        {"name": "image", "description": "The image to describe", "type": int(ShapeType.IMAGE)},
+        {"name": "image", "description": "The image to describe", "shape_type": int(ShapeType.IMAGE)},
     ],
     "output_shape": [
-        {"name": "description", "description": "Generated description", "type": int(ShapeType.TEXT)},
-        {"name": "tags", "description": "Comma-separated tags", "type": int(ShapeType.TEXT)},
+        {"name": "description", "description": "Generated description", "shape_type": int(ShapeType.TEXT)},
+        {"name": "tags", "description": "Comma-separated tags", "shape_type": int(ShapeType.TEXT)},
     ],
 }
 
