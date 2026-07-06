@@ -250,7 +250,7 @@ function mount() {
   var content=document.getElementById('content')||document.body;
   content.innerHTML='';
   root.style.height=(window.innerHeight-content.getBoundingClientRect().top)+'px';
-  root.style.display = 'block';
+  content.style.display = 'block';  // NC's #content is flex by default; make it a plain block so the page fills width
   content.appendChild(root);
   root.innerHTML =
     '<div class="hdr"><h1>Recognize <span>LLM</span> · People</h1>' +
