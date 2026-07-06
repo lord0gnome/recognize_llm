@@ -427,6 +427,26 @@ def person_faces(user_id: str, person_id: int, limit: int = 60) -> list[dict]:
     return [{"face_id": r["id"], "file_id": r["file_id"]} for r in rows]
 
 
+def person_photos(user_id: str, person_id: int, limit: int = 500) -> dict:
+    """Distinct PHOTOS a person appears in (for the "view photos" gallery), best face first.
+
+    Returns {"total": N, "photos": [{"file_id", "face_id"}]}. One entry per file (a photo with two
+    of the same person collapses to one), and face_id is that photo's sharpest face of this person
+    (SQLite returns the bare columns from the MAX(det_score) row).
+    """
+    with _connect() as con:
+        total = con.execute(
+            "SELECT COUNT(DISTINCT file_id) c FROM face_embeddings WHERE user_id=? AND cluster_id=?",
+            (user_id, person_id),
+        ).fetchone()["c"]
+        rows = con.execute(
+            "SELECT file_id, id AS face_id, MAX(det_score) FROM face_embeddings "
+            "WHERE user_id=? AND cluster_id=? GROUP BY file_id ORDER BY MAX(det_score) DESC LIMIT ?",
+            (user_id, person_id, limit),
+        ).fetchall()
+    return {"total": total, "photos": [{"file_id": r["file_id"], "face_id": r["face_id"]} for r in rows]}
+
+
 def thumb_bytes(user_id: str, face_id: int) -> bytes | None:
     """Stored JPEG face crop for *face_id*, or None. Scoped to *user_id* to prevent cross-user reads."""
     with _connect() as con:

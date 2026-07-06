@@ -45,6 +45,14 @@ async def api_person_faces(person_id: int, nc: Annotated[NextcloudApp, Depends(n
     return face_pipeline.person_faces(user, person_id)
 
 
+@router.get("/people/api/photos/{person_id}")
+async def api_person_photos(person_id: int, nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
+    user = _require_user(nc)
+    if not user:
+        return {"total": 0, "photos": []}
+    return face_pipeline.person_photos(user, person_id)
+
+
 @router.get("/people/api/thumb/{face_id}")
 async def api_face_thumb(face_id: int, nc: Annotated[NextcloudApp, Depends(nc_app)]) -> Response:
     user = _require_user(nc)
@@ -199,6 +207,10 @@ var CSS = `
 #rlm-modal .fitem.sel { border-color:#4dabf7; }
 #rlm-modal .fitem.sel::after { content:'✓'; position:absolute; top:2px; right:5px; color:#4dabf7; font-weight:700; }
 #rlm-modal .foot { display:flex; gap:10px; justify-content:flex-end; margin-top:18px; }
+#rlm-modal .pgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:10px; }
+#rlm-modal .pitem { display:block; aspect-ratio:1; border-radius:10px; overflow:hidden; background:#1a1b1e; border:1px solid #2c2d32; }
+#rlm-modal .pitem img { width:100%; height:100%; object-fit:cover; display:block; transition:transform .15s; }
+#rlm-modal .pitem:hover img { transform:scale(1.06); }
 `;
 
 function el(tag, cls, html) { var e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; }
@@ -276,6 +288,8 @@ function card(p) {
   if(p.sample_face_id>=0) face.appendChild(faceThumb(p.sample_face_id,p.sample_file_id));
   else face.appendChild(el('div','noface','👤'));
   face.appendChild(el('div','cnt',p.faces+' · '+p.files+' 🖼'));
+  face.style.cursor='pointer'; face.title='View all photos of this person';
+  face.addEventListener('click',function(){ openPhotos(p); });
   c.appendChild(face);
 
   var body=el('div','pbody');
@@ -296,6 +310,7 @@ function card(p) {
     cancel.addEventListener('click',function(){ mergeSource=null; render_reload(); });
     acts.appendChild(cancel);
   } else {
+    var vw=el('button','mini go','📷 photos'); vw.addEventListener('click',function(){ openPhotos(p); }); acts.appendChild(vw);
     var mg=el('button','mini','merge'); mg.addEventListener('click',function(){ mergeSource=p.person_id; render_reload(); }); acts.appendChild(mg);
     var sp=el('button','mini','split'); sp.addEventListener('click',function(){ openSplit(p); }); acts.appendChild(sp);
     if(p.ignored){ var rs=el('button','mini','restore'); rs.addEventListener('click',function(){ post('/ignore',{person_id:p.person_id,ignored:false}).then(load); }); acts.appendChild(rs); }
@@ -307,6 +322,33 @@ function card(p) {
 }
 
 function render_reload() { load(); }
+
+function openPhotos(p) {
+  fetch(API+'/photos/'+p.person_id,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(data){
+    var photos=data.photos||[];
+    var modal=el('div'); modal.id='rlm-modal';
+    var box=el('div','box'); box.style.maxWidth='920px';
+    var title=(p.name||('Person '+p.person_id))+' — '+data.total+' photo'+(data.total===1?'':'s');
+    box.appendChild(el('h2', title));
+    box.appendChild(el('p','Every photo matched to this person. Click any photo to open it in Files.'
+      + (data.total>photos.length ? ' Showing the '+photos.length+' clearest.' : '')));
+    var pg=el('div','pgrid');
+    photos.forEach(function(ph){
+      var a=el('a','pitem'); a.href='/index.php/f/'+ph.file_id; a.target='_blank'; a.rel='noopener';
+      var img=new Image(); img.loading='lazy';
+      img.src='/index.php/core/preview?fileId='+ph.file_id+'&x=256&y=256&a=1';
+      img.onerror=function(){ img.onerror=null; img.src=API+'/thumb/'+ph.face_id; };
+      a.appendChild(img); pg.appendChild(a);
+    });
+    box.appendChild(pg);
+    var foot=el('div','foot');
+    var close=el('button','btn','Close'); close.addEventListener('click',function(){ modal.remove(); });
+    foot.appendChild(close); box.appendChild(foot);
+    modal.appendChild(box);
+    modal.addEventListener('click',function(e){ if(e.target===modal) modal.remove(); });
+    document.body.appendChild(modal);
+  });
+}
 
 function openSplit(p) {
   fetch(API+'/faces/'+p.person_id,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(faces){
