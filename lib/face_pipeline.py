@@ -214,13 +214,20 @@ def cluster_and_tag(nc: "NextcloudApp", users: list[str], min_samples: int = 3, 
                 for idx in members:
                     con.execute("UPDATE face_embeddings SET cluster_id=? WHERE id=?", (int(pid), rows[idx]["id"]))
 
+        # Face ids that already have a crop — prefer them as a person's representative so the card
+        # shows a real face instead of falling back to the whole photo.
+        with _connect() as con:
+            thumbed = {r["face_id"] for r in con.execute(
+                "SELECT t.face_id FROM face_thumbs t JOIN face_embeddings e ON e.id=t.face_id WHERE e.user_id=?",
+                (user_id,))}
+
         tagged = 0
         for lbl, members in raw.items():
             pid = assignment[lbl]
             prev = existing.get(pid, {})
             name = prev.get("name", "") if prev else ""
             ignored = bool(prev.get("ignored", 0)) if prev else False
-            best_idx = max(members, key=lambda i: rows[i]["det_score"])
+            best_idx = max(members, key=lambda i: (rows[i]["id"] in thumbed, rows[i]["det_score"]))
             sample_face_id = rows[best_idx]["id"]
             file_ids = sorted({rows[i]["file_id"] for i in members})
 
@@ -456,6 +463,77 @@ def thumb_bytes(user_id: str, face_id: int) -> bytes | None:
             (int(face_id), user_id),
         ).fetchone()
     return row["jpeg"] if row else None
+
+
+def ensure_thumb(nc, user_id: str, face_id: int) -> bytes | None:
+    """Return a face crop for *face_id*, generating and caching one if none is stored yet.
+
+    Faces extracted before the crop feature existed (and the pre-M7 embeddings the backfill skips)
+    have no stored thumbnail, so their person card falls back to the whole photo. Here we make a
+    proper face crop on demand: download the file, crop the stored bbox — or, for an old face with no
+    bbox, re-detect and pick the face whose embedding matches this one — then cache it. This is what
+    makes an unnamed cluster show a clear face so you can tell who it is.
+    """
+    jpeg = thumb_bytes(user_id, face_id)
+    if jpeg:
+        return jpeg
+    with _connect() as con:
+        row = con.execute(
+            "SELECT file_id, bbox, embedding FROM face_embeddings WHERE id=? AND user_id=?",
+            (int(face_id), user_id),
+        ).fetchone()
+    if not row:
+        return None
+    try:
+        import cv2
+        node = _download_node(nc, row["file_id"])
+        if node is None or node.is_dir:
+            return None
+        data = nc.files.download(node)
+        img = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        bbox = json.loads(row["bbox"]) if row["bbox"] else None
+        if not bbox:
+            bbox = _detect_bbox_for_embedding(img, np.frombuffer(row["embedding"], dtype=np.float32))
+        if not bbox:
+            return None
+        thumb = _crop_thumb(img, bbox)
+        if not thumb:
+            return None
+        with _connect() as con:
+            con.execute("INSERT OR REPLACE INTO face_thumbs (face_id, jpeg) VALUES (?, ?)", (int(face_id), thumb))
+            if not row["bbox"]:
+                con.execute("UPDATE face_embeddings SET bbox=? WHERE id=?", (json.dumps(bbox), int(face_id)))
+        return thumb
+    except Exception as e:
+        nc.log(LogLvl.WARNING, f"recognize_llm: thumb generation failed for face {face_id}: {e}")
+        return None
+
+
+def _download_node(nc, file_id: int, tries: int = 3):
+    """Resolve a file node by id, retrying the (occasionally flaky under load) WebDAV find."""
+    from nc_py_api._exceptions import NextcloudException
+    for attempt in range(tries):
+        try:
+            return nc.files.by_id(int(file_id))
+        except NextcloudException:
+            if attempt < tries - 1:
+                time.sleep(0.8)
+    return None
+
+
+def _detect_bbox_for_embedding(img, target_emb: np.ndarray) -> list[int] | None:
+    """Re-detect faces and return the bbox of the one whose embedding matches *target_emb* best."""
+    try:
+        faces = _model().get(img)
+    except Exception:
+        return None
+    if not faces:
+        return None
+    target = _normalize(target_emb.astype(np.float32))
+    best = max(faces, key=lambda f: float(np.dot(_normalize(f.embedding.astype(np.float32)), target)))
+    return [int(x) for x in best.bbox.tolist()]
 
 
 # ---------------------------------------------------------------------------

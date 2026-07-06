@@ -58,7 +58,8 @@ async def api_face_thumb(face_id: int, nc: Annotated[NextcloudApp, Depends(nc_ap
     user = _require_user(nc)
     if not user:
         return Response(status_code=404)
-    jpeg = face_pipeline.thumb_bytes(user, face_id)
+    nc.set_user(user)  # generation may need to download the file in the owner's context
+    jpeg = face_pipeline.ensure_thumb(nc, user, face_id)
     if not jpeg:
         return Response(status_code=404)
     return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
