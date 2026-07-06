@@ -212,6 +212,24 @@ var CSS = `
 #rlm-modal .pitem { display:block; aspect-ratio:1; border-radius:10px; overflow:hidden; background:#1a1b1e; border:1px solid #2c2d32; }
 #rlm-modal .pitem img { width:100%; height:100%; object-fit:cover; display:block; transition:transform .15s; }
 #rlm-modal .pitem:hover img { transform:scale(1.06); }
+/* async-action feedback */
+.rlm-spin { display:inline-block; width:11px; height:11px; border:2px solid rgba(255,255,255,.25); border-top-color:#4dabf7; border-radius:50%; animation:rlm-spin .7s linear infinite; vertical-align:-2px; }
+@keyframes rlm-spin { to { transform:rotate(360deg); } }
+#rlm-people .pcard { position:relative; }
+#rlm-people .pcard.busy { pointer-events:none; }
+#rlm-people .pcard .ovl { position:absolute; inset:0; z-index:4; display:flex; align-items:center; justify-content:center; gap:8px;
+  background:rgba(26,27,30,.66); color:#cdd3d9; font-size:.72rem; backdrop-filter:blur(1px); }
+#rlm-people .pcard.added { animation:rlm-pop .4s cubic-bezier(.34,1.56,.64,1); }
+@keyframes rlm-pop { 0%{opacity:0;transform:scale(.85);} 100%{opacity:1;transform:scale(1);} }
+#rlm-people .pcard.removing { animation:rlm-shrink .3s ease forwards; }
+@keyframes rlm-shrink { to { opacity:0; transform:scale(.9); } }
+#rlm-people .nameinput.saving { border-color:#e8a13a; }
+#rlm-people .nameinput.saved { border-color:#2f9e44; }
+#rlm-people .sec { display:none; }
+#rlm-toast { position:fixed; bottom:22px; left:50%; transform:translateX(-50%) translateY(8px); background:#2c2d32; color:#e6e6e6;
+  border:1px solid #3a3b42; border-radius:24px; padding:9px 18px; font-size:.78rem; z-index:10001; opacity:0;
+  transition:opacity .2s ease, transform .2s ease; pointer-events:none; box-shadow:0 8px 24px rgba(0,0,0,.45); }
+#rlm-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
 `;
 
 function el(tag, cls, html) { var e=document.createElement(tag); if(cls)e.className=cls; if(html!=null)e.innerHTML=html; return e; }
@@ -232,22 +250,43 @@ function mount() {
   var content=document.getElementById('content')||document.body;
   content.innerHTML='';
   root.style.height=(window.innerHeight-content.getBoundingClientRect().top)+'px';
+  root.style.display = 'block';
   content.appendChild(root);
   root.innerHTML =
     '<div class="hdr"><h1>Recognize <span>LLM</span> · People</h1>' +
     '<div class="sub" id="rlm-psub">loading…</div>' +
     '<button class="btn primary" id="rlm-recluster">Recluster now</button></div>' +
-    '<div id="rlm-named"></div><div id="rlm-review"></div><div id="rlm-ignored"></div>';
+    '<div class="sec" id="rlm-sec-named"><div class="stitle">Named</div><div class="grid" id="rlm-named"></div></div>' +
+    '<div class="sec" id="rlm-sec-review"><div class="stitle" id="rlm-review-title">To review</div><div class="grid" id="rlm-review"></div></div>' +
+    '<div class="sec" id="rlm-sec-ignored"><div class="stitle">Ignored</div><div class="grid" id="rlm-ignored"></div></div>' +
+    '<div id="rlm-empty"></div>';
   document.getElementById('rlm-recluster').addEventListener('click', recluster);
   load();
 }
 
+/* ── transient feedback: toast + spinners + per-card overlay ───────────────── */
+var _toastTimer=null;
+function toast(msg){
+  var t=document.getElementById('rlm-toast');
+  if(!t){ t=el('div'); t.id='rlm-toast'; document.body.appendChild(t); }
+  t.textContent=msg; t.classList.add('show');
+  clearTimeout(_toastTimer); _toastTimer=setTimeout(function(){ t.classList.remove('show'); }, 2200);
+}
+function spin(label){ return '<span class="rlm-spin"></span>'+(label?(' '+label):''); }
+function cardBusy(card, label){
+  if(!card) return function(){};
+  card.classList.add('busy');
+  var ov=el('div','ovl'); ov.innerHTML=spin(label); card.appendChild(ov);
+  return function(){ card.classList.remove('busy'); if(ov.parentNode) ov.remove(); };
+}
+
 function recluster() {
   var b=document.getElementById('rlm-recluster');
-  b.disabled=true; b.textContent='Clustering…';
+  b.disabled=true; b.innerHTML=spin('Clustering…');
+  toast('Reclustering…');
   fetch(API+'/recluster',{method:'POST',credentials:'same-origin'})
-    .then(function(){ setTimeout(function(){ b.disabled=false; b.textContent='Recluster now'; load(); }, 2500); })
-    .catch(function(){ b.disabled=false; b.textContent='Recluster now'; });
+    .then(function(){ setTimeout(function(){ b.disabled=false; b.textContent='Recluster now'; load().then(function(){ toast('Reclustered'); }); }, 2500); })
+    .catch(function(){ b.disabled=false; b.textContent='Recluster now'; toast('Recluster failed'); });
 }
 
 function post(path, body) {
@@ -255,74 +294,146 @@ function post(path, body) {
     .then(function(r){return r.json();});
 }
 
+/* ── Reconciling renderer: fetch the list, then update ONLY what changed ────── */
+var cardById={};   // person_id -> card element (kept across updates)
+var dataById={};   // person_id -> last-seen data
+var booted=false;
+
+function catOf(p){ return p.ignored ? 'ignored' : (p.name ? 'named' : 'review'); }
+function gridFor(cat){ return document.getElementById(cat==='ignored'?'rlm-ignored':cat==='named'?'rlm-named':'rlm-review'); }
+
 function load() {
-  fetch(API+'/list',{credentials:'same-origin'}).then(function(r){return r.json();}).then(render)
+  return fetch(API+'/list',{credentials:'same-origin'}).then(function(r){return r.json();}).then(reconcile)
     .catch(function(){ document.getElementById('rlm-psub').textContent='error loading'; });
 }
 
-function render(people) {
-  var named=[], review=[], ignored=[];
-  people.forEach(function(p){ if(p.ignored) ignored.push(p); else if(p.name) named.push(p); else review.push(p); });
-  document.getElementById('rlm-psub').textContent = people.length+' people · '+
-    people.reduce(function(a,p){return a+p.faces;},0)+' faces';
-
-  section('rlm-named', named.length?'Named':'', named);
-  section('rlm-review', 'To review'+(mergeSource?' — pick a card to merge into':''), review);
-  section('rlm-ignored', ignored.length?'Ignored':'', ignored);
-  if(!people.length)
-    document.getElementById('rlm-review').innerHTML =
-      '<div class="grid"><div class="empty"><div class="empty-icon">🧑‍🤝‍🧑</div>No people yet. Process some photos, then hit “Recluster now”.</div></div>';
+function reconcile(people) {
+  var seen={};
+  people.forEach(function(p){
+    seen[p.person_id]=1;
+    var card=cardById[p.person_id];
+    if(card){ patchCard(card, p); }
+    else { card=createCard(p); cardById[p.person_id]=card; if(booted) card.classList.add('added'); }
+    dataById[p.person_id]=p;
+    var g=gridFor(catOf(p));                 // move into the right section if its category changed
+    if(card.parentNode!==g) g.appendChild(card);
+  });
+  Object.keys(cardById).forEach(function(id){
+    if(!seen[id]){                            // person gone (merged away) — animate out
+      var c=cardById[id]; delete cardById[id]; delete dataById[id];
+      c.classList.add('removing'); setTimeout(function(){ if(c.parentNode) c.remove(); }, 300);
+    }
+  });
+  var faces=people.reduce(function(a,p){return a+p.faces;},0);
+  document.getElementById('rlm-psub').textContent = people.length+' people · '+faces+' faces';
+  ['named','review','ignored'].forEach(function(cat){
+    document.getElementById('rlm-sec-'+cat).style.display = gridFor(cat).children.length ? 'block':'none';
+  });
+  document.getElementById('rlm-review-title').textContent = 'To review'+(mergeSource?' — pick a card to merge into':'');
+  document.getElementById('rlm-empty').innerHTML = people.length ? '' :
+    '<div class="empty"><div class="empty-icon">🧑‍🤝‍🧑</div>No people yet. Process some photos, then hit “Recluster now”.</div>';
+  booted=true;
 }
 
-function section(id, title, list) {
-  var host=document.getElementById(id); host.innerHTML='';
-  if(!list.length){ return; }
-  if(title) host.appendChild(el('div','stitle',title));
-  var grid=el('div','grid');
-  list.forEach(function(p){ grid.appendChild(card(p)); });
-  host.appendChild(grid);
-}
-
-function card(p) {
-  var c=el('div','pcard'+(p.ignored?' dim':'')+(mergeSource===p.person_id?' merge-src':''));
-  var face=el('div','face');
-  if(p.sample_face_id>=0) face.appendChild(faceThumb(p.sample_face_id,p.sample_file_id));
-  else face.appendChild(el('div','noface','👤'));
-  face.appendChild(el('div','cnt',p.faces+' · '+p.files+' 🖼'));
+function createCard(p) {
+  var c=el('div','pcard'); c._pid=p.person_id;
+  var face=el('div','face'); c._face=face;
   face.style.cursor='pointer'; face.title='View all photos of this person';
-  face.addEventListener('click',function(){ openPhotos(p); });
+  face.addEventListener('click',function(){ openPhotos(dataById[c._pid]||p); });
+  var cnt=el('div','cnt'); c._cnt=cnt; face.appendChild(cnt);
   c.appendChild(face);
 
   var body=el('div','pbody');
-  var input=el('input','nameinput'); input.type='text'; input.value=p.name||''; input.placeholder='Name this person…';
-  input.addEventListener('keydown',function(e){ if(e.key==='Enter'){ input.blur(); } });
-  input.addEventListener('blur',function(){
-    if((input.value||'').trim()!==(p.name||'')) post('/name',{person_id:p.person_id,name:input.value.trim()}).then(load);
+  var input=el('input','nameinput'); input.type='text'; input.placeholder='Name this person…'; c._input=input;
+  input.addEventListener('keydown',function(e){
+    if(e.key==='Enter'){ input.blur(); }
+    if(e.key==='Escape'){ input.value=(dataById[c._pid]||{}).name||''; input.blur(); }
   });
+  input.addEventListener('blur',function(){ saveName(c); });
   body.appendChild(input);
 
-  var acts=el('div','acts');
-  if(mergeSource && mergeSource!==p.person_id){
-    var into=el('button','mini go','＋ merge here');
-    into.addEventListener('click',function(){ post('/merge',{source_id:mergeSource,target_id:p.person_id}).then(function(){ mergeSource=null; load(); }); });
-    acts.appendChild(into);
-  } else if(mergeSource===p.person_id){
-    var cancel=el('button','mini','cancel merge');
-    cancel.addEventListener('click',function(){ mergeSource=null; render_reload(); });
-    acts.appendChild(cancel);
-  } else {
-    var vw=el('button','mini go','📷 photos'); vw.addEventListener('click',function(){ openPhotos(p); }); acts.appendChild(vw);
-    var mg=el('button','mini','merge'); mg.addEventListener('click',function(){ mergeSource=p.person_id; render_reload(); }); acts.appendChild(mg);
-    var sp=el('button','mini','split'); sp.addEventListener('click',function(){ openSplit(p); }); acts.appendChild(sp);
-    if(p.ignored){ var rs=el('button','mini','restore'); rs.addEventListener('click',function(){ post('/ignore',{person_id:p.person_id,ignored:false}).then(load); }); acts.appendChild(rs); }
-    else { var ig=el('button','mini warn','not a person'); ig.addEventListener('click',function(){ post('/ignore',{person_id:p.person_id,ignored:true}).then(load); }); acts.appendChild(ig); }
-  }
-  body.appendChild(acts);
+  var acts=el('div','acts'); c._acts=acts; body.appendChild(acts);
   c.appendChild(body);
+  c._sampleId=undefined;
+  patchCard(c, p);
   return c;
 }
 
-function render_reload() { load(); }
+function patchCard(card, p) {
+  card.classList.toggle('dim', !!p.ignored);
+  card.classList.toggle('merge-src', mergeSource===p.person_id);
+  card._cnt.textContent = p.faces+' · '+p.files+' 🖼';
+  if(card._sampleId!==p.sample_face_id){    // only swap the thumbnail when the representative changed
+    card._sampleId=p.sample_face_id;
+    Array.prototype.slice.call(card._face.childNodes).forEach(function(n){ if(n!==card._cnt) card._face.removeChild(n); });
+    var node = p.sample_face_id>=0 ? faceThumb(p.sample_face_id,p.sample_file_id) : el('div','noface','👤');
+    card._face.insertBefore(node, card._cnt);
+  }
+  if(document.activeElement!==card._input && card._input.value!==(p.name||'')) card._input.value=p.name||'';
+  updateActs(card, p);
+}
+
+function updateActs(card, p) {
+  var acts=card._acts; acts.innerHTML='';
+  if(mergeSource && mergeSource!==p.person_id){
+    var into=el('button','mini go','＋ merge here');
+    into.addEventListener('click',function(){ doMerge(mergeSource, p.person_id); });
+    acts.appendChild(into);
+  } else if(mergeSource===p.person_id){
+    var cancel=el('button','mini','cancel merge');
+    cancel.addEventListener('click',function(){ setMerge(null); });
+    acts.appendChild(cancel);
+  } else {
+    var vw=el('button','mini go','📷 photos'); vw.addEventListener('click',function(){ openPhotos(dataById[p.person_id]||p); }); acts.appendChild(vw);
+    var mg=el('button','mini','merge'); mg.addEventListener('click',function(){ setMerge(p.person_id); }); acts.appendChild(mg);
+    var sp=el('button','mini','split'); sp.addEventListener('click',function(){ openSplit(dataById[p.person_id]||p); }); acts.appendChild(sp);
+    if(p.ignored){ var rs=el('button','mini','restore'); rs.addEventListener('click',function(){ doIgnore(card,p,false); }); acts.appendChild(rs); }
+    else { var ig=el('button','mini warn','not a person'); ig.addEventListener('click',function(){ doIgnore(card,p,true); }); acts.appendChild(ig); }
+  }
+}
+
+/* Entering/leaving merge mode is a purely local UI change — no fetch, no re-render. */
+function setMerge(pid) {
+  mergeSource=pid;
+  Object.keys(cardById).forEach(function(id){
+    var c=cardById[id], p=dataById[id];
+    c.classList.toggle('merge-src', mergeSource===p.person_id);
+    updateActs(c, p);
+  });
+  document.getElementById('rlm-review-title').textContent = 'To review'+(mergeSource?' — pick a card to merge into':'');
+}
+
+function saveName(card) {
+  var input=card._input, p=dataById[card._pid]; if(!p) return;
+  var val=(input.value||'').trim();
+  if(val===(p.name||'')) return;
+  input.classList.remove('saved'); input.classList.add('saving');
+  post('/name',{person_id:card._pid,name:val}).then(function(res){
+    input.classList.remove('saving');
+    if(res && res.ok){
+      input.classList.add('saved'); setTimeout(function(){ input.classList.remove('saved'); }, 1200);
+      toast(val ? ('Named “'+val+'”') : 'Name cleared');
+      load();                                 // reconcile → card slides between “To review” and “Named”
+    } else { toast('Rename failed'); }
+  }).catch(function(){ input.classList.remove('saving'); toast('Rename failed'); });
+}
+
+function doMerge(source, target) {
+  var done=cardBusy(cardById[target], 'merging…');
+  setMerge(null);
+  post('/merge',{source_id:source,target_id:target}).then(function(res){
+    if(res && res.ok){ toast('Merged'); load().then(done); }
+    else { done(); toast('Merge failed'); }
+  }).catch(function(){ done(); toast('Merge failed'); });
+}
+
+function doIgnore(card, p, ignored) {
+  var done=cardBusy(card, ignored?'hiding…':'restoring…');
+  post('/ignore',{person_id:p.person_id,ignored:ignored}).then(function(res){
+    if(res && res.ok){ toast(ignored?'Marked “not a person”':'Restored'); load().then(done); }
+    else { done(); toast('Action failed'); }
+  }).catch(function(){ done(); toast('Action failed'); });
+}
 
 function openPhotos(p) {
   fetch(API+'/photos/'+p.person_id,{credentials:'same-origin'}).then(function(r){return r.json();}).then(function(data){
@@ -369,7 +480,12 @@ function openSplit(p) {
     var cancel=el('button','btn','Cancel'); cancel.addEventListener('click',function(){ modal.remove(); });
     var ok=el('button','btn primary','Split selected'); ok.addEventListener('click',function(){
       var ids=Object.keys(sel).map(Number); if(!ids.length){ modal.remove(); return; }
-      post('/split',{person_id:p.person_id,face_ids:ids}).then(function(){ modal.remove(); load(); });
+      ok.disabled=true; cancel.disabled=true; ok.innerHTML=spin('Splitting…');
+      post('/split',{person_id:p.person_id,face_ids:ids}).then(function(res){
+        modal.remove();
+        if(res && res.ok){ toast(ids.length+' face'+(ids.length===1?'':'s')+' split into a new person'); load(); }
+        else { toast('Split failed'); }
+      }).catch(function(){ modal.remove(); toast('Split failed'); });
     });
     foot.appendChild(cancel); foot.appendChild(ok); box.appendChild(foot);
     modal.appendChild(box);
