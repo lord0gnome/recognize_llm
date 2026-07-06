@@ -15,6 +15,7 @@ import job_queue
 import routes_backfill
 import routes_dashboard
 import routes_events
+import routes_people
 import settings as settings_mod
 import settings_ui
 import task_provider
@@ -47,6 +48,7 @@ APP.add_middleware(AppAPIAuthMiddleware)
 APP.include_router(routes_events.router)
 APP.include_router(routes_backfill.router)
 APP.include_router(routes_dashboard.router)
+APP.include_router(routes_people.router)
 
 
 @APP.post("/describe_now")
@@ -93,6 +95,11 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 "type": "top_menu", "name": "dashboard",
                 "path": "js/dashboard-loader", "afterAppId": "",
             })
+            nc.ui.top_menu.register("people", "People", icon="img/icon.svg")
+            nc.ocs("POST", "/ocs/v1.php/apps/app_api/api/v1/ui/script", json={
+                "type": "top_menu", "name": "people",
+                "path": "js/people-loader", "afterAppId": "",
+            })
             nc.occ_commands.register(
                 "recognize_llm:backfill",
                 "/occ/backfill",
@@ -122,6 +129,10 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             nc.ui.top_menu.unregister("dashboard")
             nc.ocs("DELETE", "/ocs/v1.php/apps/app_api/api/v1/ui/script", params={
                 "type": "top_menu", "name": "dashboard", "path": "js/dashboard-loader",
+            })
+            nc.ui.top_menu.unregister("people")
+            nc.ocs("DELETE", "/ocs/v1.php/apps/app_api/api/v1/ui/script", params={
+                "type": "top_menu", "name": "people", "path": "js/people-loader",
             })
             nc.occ_commands.unregister("recognize_llm:backfill")
             nc.occ_commands.unregister("recognize_llm:cluster-faces")

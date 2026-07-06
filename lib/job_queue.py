@@ -29,6 +29,13 @@ def _connect() -> sqlite3.Connection:
     return con
 
 
+def _add_column(con: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    """Idempotently add a column (SQLite has no ADD COLUMN IF NOT EXISTS)."""
+    cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 _RECENT_LIMIT = 50
 
 
@@ -77,6 +84,54 @@ def init_db() -> None:
             )
             """
         )
+        # M7: face review needs a bounding box (to crop thumbnails) and a detection score
+        # (to pick the sharpest face as a person's representative). Added post-hoc so existing
+        # embedding rows survive; new columns default empty and get populated on next extraction.
+        _add_column(con, "face_embeddings", "bbox", "TEXT NOT NULL DEFAULT ''")
+        _add_column(con, "face_embeddings", "det_score", "REAL NOT NULL DEFAULT 0")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_face_emb_person ON face_embeddings(user_id, cluster_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_face_emb_file ON face_embeddings(user_id, file_id)")
+
+        # Small JPEG face crops (~112px) shown in the People review UI. Kept in a side table so
+        # the embeddings table stays lean and thumbnails can be pruned independently.
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_thumbs (
+                face_id INTEGER PRIMARY KEY,
+                jpeg    BLOB NOT NULL
+            )
+            """
+        )
+        # A "person" is a stable identity: its person_id is preserved across re-clustering runs by
+        # matching cluster centroids (not DBSCAN's volatile labels), so user-given names, merges and
+        # splits survive. cluster_id in face_embeddings holds this person_id (-1 = unassigned).
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_persons (
+                user_id        TEXT NOT NULL,
+                person_id      INTEGER NOT NULL,
+                name           TEXT NOT NULL DEFAULT '',
+                tag_id         INTEGER NOT NULL DEFAULT -1,
+                centroid       BLOB,
+                sample_face_id INTEGER NOT NULL DEFAULT -1,
+                face_count     INTEGER NOT NULL DEFAULT 0,
+                ignored        INTEGER NOT NULL DEFAULT 0,
+                updated_at     INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, person_id)
+            )
+            """
+        )
+        # Monotonic per-user person_id allocator so ids are never reused (stable across deletes).
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS face_meta (
+                user_id        TEXT PRIMARY KEY,
+                next_person_id INTEGER NOT NULL DEFAULT 1
+            )
+            """
+        )
+        # Legacy table from the pre-M7 clustering prototype; superseded by face_persons. Kept
+        # (unused) so an in-place upgrade doesn't drop data mid-migration.
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS face_clusters (

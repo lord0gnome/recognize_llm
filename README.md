@@ -104,11 +104,17 @@ make test       # python -m pytest tests/
       (`TaskProcessingService::getAnonymousTaskType()` throws on `type`, which silently drops the
       whole task type from `getAvailableTaskTypes()` — no task types show up at all in that case,
       not just ours). See `lib/task_provider.py`.
-- [ ] M7 **Face detection and person grouping**
-  - Detect faces in images and extract embeddings (dedicated face-embedding model, e.g. InsightFace/ArcFace)
-  - Cluster embeddings across the library to identify unique individuals
-  - Assign a stable `person:N` system tag per cluster so all photos of the same person are linked
-  - Admin UI to review clusters, merge/split them, and optionally name a person
-    (named persons become a named tag, e.g. `person:alice`)
-  - Privacy mode: keep embeddings local, never send face crops to the vision endpoint
-  - Incremental: new uploads are matched against existing clusters in real time
+- [x] M7 **Face detection and person grouping**
+  - [x] Detect faces in images and extract embeddings — InsightFace/ArcFace `buffalo_sc`, fully local
+        ([lib/face_pipeline.py](lib/face_pipeline.py))
+  - [x] Cluster embeddings across the library (DBSCAN, cosine) to identify unique individuals
+  - [x] Stable `person:N` system tag per cluster — person ids survive re-clustering by matching
+        cluster centroids, so names/merges/splits persist (unnamed → `person:<user>:<id>`)
+  - [x] Review UI to name, merge, split, and ignore people — the **People** top-menu entry
+        ([lib/routes_people.py](lib/routes_people.py)); named persons become `person:<name>`
+  - [x] Privacy: embeddings and face crops stay on-box; only the whole image is ever sent to the
+        vision endpoint, never a face crop
+  - [x] Incremental: new uploads are matched against existing person centroids in real time and
+        tagged immediately; a periodic/`occ`/UI recluster seeds and refreshes the groups
+  - Run a batch cluster: `occ recognize_llm:cluster-faces [--users a,b] [--min-photos 3]`, the
+    People page's **Recluster now** button, or automatically once a backfill finishes.

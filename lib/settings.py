@@ -49,6 +49,9 @@ _KEYS: dict[str, tuple[str, str]] = {
     "max_tokens": ("MAX_TOKENS", "1024"),
     "face_clustering": ("FACE_CLUSTERING", "yes"),
     "face_min_samples": ("FACE_MIN_SAMPLES", "3"),
+    # Cosine similarity (0–1) required to fold a face into an existing person, both for real-time
+    # matching on upload and as the DBSCAN neighbourhood (eps = 1 − this). Higher = stricter/purer.
+    "face_match_min_similarity": ("FACE_MATCH_MIN_SIMILARITY", "0.5"),
 }
 
 
@@ -67,6 +70,7 @@ class Settings:
     max_tokens: int
     face_clustering: bool
     face_min_samples: int
+    face_match_min_similarity: float
 
     @property
     def chat_url(self) -> str:
@@ -113,4 +117,5 @@ def load(nc: NextcloudApp) -> Settings:
         max_tokens=max(64, int(r["max_tokens"] or 1024)),
         face_clustering=str(r["face_clustering"]).lower() in ("1", "yes", "true", "on"),
         face_min_samples=max(2, int(r["face_min_samples"] or 3)),
+        face_match_min_similarity=min(0.95, max(0.1, float(r["face_match_min_similarity"] or 0.5))),
     )

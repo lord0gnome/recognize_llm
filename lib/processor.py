@@ -63,8 +63,9 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     storage.set_marker(nc, node)
     nc.log(LogLvl.INFO, f"recognize_llm: tagged {node.user_path} with {caption.tags}")
 
-    # Extract face embeddings from images (not videos) when clustering is enabled.
+    # Extract face embeddings from images (not videos) when clustering is enabled, and
+    # incrementally tag any already-known person so new uploads are grouped in real time.
     if not is_video and settings.face_clustering:
-        face_pipeline.extract_faces(raw_bytes, user_id, file_id)
+        face_pipeline.extract_faces(nc, raw_bytes, user_id, file_id, settings)
 
     return Result("done", caption=caption, name=node.name, path=node.user_path)

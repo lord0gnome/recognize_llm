@@ -75,12 +75,51 @@ def _crawl(nc: NextcloudApp, users: list[str], path: str) -> None:
                 _state["enqueued"] += 1
             _state["users_done"] += 1
         nc.log(LogLvl.INFO, f"recognize_llm: backfill enqueued {_state['enqueued']} files")
+        # Backfill only enqueues; workers extract faces as they process. Once the queue drains,
+        # form/refresh people from the freshly extracted embeddings (real-time matching already
+        # groups uploads incrementally, but the first pass needs a batch cluster to seed persons).
+        if cfg.face_clustering:
+            _autocluster_when_idle(list(users), cfg.face_min_samples, cfg.face_match_min_similarity)
     except Exception as e:
         _state["error"] = str(e)
         nc.log(LogLvl.ERROR, f"recognize_llm: backfill failed: {e}")
     finally:
         _state["running"] = False
         _state["current_user"] = ""
+
+
+_autocluster_lock = threading.Lock()
+_autocluster_active = False
+
+
+def _autocluster_when_idle(users: list[str], min_samples: int, min_similarity: float) -> None:
+    """Spawn a daemon that waits for the queue to drain, then clusters faces for *users* once."""
+    global _autocluster_active
+    with _autocluster_lock:
+        if _autocluster_active:
+            return
+        _autocluster_active = True
+
+    def _run() -> None:
+        global _autocluster_active
+        import time
+        import face_pipeline
+        nc2 = NextcloudApp()
+        try:
+            deadline = time.time() + 12 * 3600  # give even a huge backfill a full run to finish
+            while time.time() < deadline:
+                st = job_queue.status()
+                if st["pending"] == 0 and st["processing"] == 0:
+                    break
+                time.sleep(20)
+            face_pipeline.cluster_and_tag(nc2, users, min_samples, min_similarity)
+        except Exception as e:
+            nc2.log(LogLvl.WARNING, f"recognize_llm: auto-cluster after backfill failed: {e}")
+        finally:
+            with _autocluster_lock:
+                _autocluster_active = False
+
+    threading.Thread(target=_run, name="recognize-llm-autocluster", daemon=True).start()
 
 
 @router.post("/backfill/start")
@@ -149,5 +188,7 @@ def occ_cluster_faces(
         return {"status": "no_users"}
     cfg = settings_mod.load(nc)
     min_samples = max(2, int(options.get("min-photos") or cfg.face_min_samples))
-    background_tasks.add_task(face_pipeline.cluster_and_tag, nc, users, min_samples)
+    background_tasks.add_task(
+        face_pipeline.cluster_and_tag, nc, users, min_samples, cfg.face_match_min_similarity
+    )
     return {"status": "started", "users": users, "min_photos": min_samples}

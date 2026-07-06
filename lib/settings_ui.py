@@ -137,6 +137,39 @@ def _form() -> SettingsForm:
                     "regardless of this setting."
                 ),
             ),
+            # ── People / face grouping (M7) ──────────────────────────────────
+            SettingsField(
+                id="face_clustering",
+                title="Group faces into people",
+                type=SettingsFieldType.CHECKBOX,
+                default=True,
+                description=(
+                    "Detect faces in processed photos and group them into people, tagged person:… and "
+                    "reviewable under the People menu. Runs fully locally (InsightFace/ArcFace) — face "
+                    "data is never sent to the vision endpoint. Videos are never face-scanned."
+                ),
+            ),
+            SettingsField(
+                id="face_min_samples",
+                title="Minimum photos per person",
+                type=SettingsFieldType.NUMBER,
+                default=3,
+                description=(
+                    "A face group must contain at least this many faces to become a person (DBSCAN "
+                    "min_samples). Lower finds more (smaller) people but with more false groupings."
+                ),
+            ),
+            SettingsField(
+                id="face_match_min_similarity",
+                title="Face match strictness (0–1)",
+                type=SettingsFieldType.TEXT,  # decimal — NUMBER fields step in integers
+                default="0.5",
+                description=(
+                    "Cosine similarity required to consider two faces the same person, used both for "
+                    "real-time matching of new uploads and for clustering (eps = 1 − this). "
+                    "Raise toward 0.6–0.7 for purer groups, lower for more merging. 0.5 is a good start."
+                ),
+            ),
         ],
     )
 
