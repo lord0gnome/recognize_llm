@@ -68,6 +68,25 @@ modified. Also registered as a TaskProcessing provider so other Nextcloud AI fea
 				<access_level>USER</access_level>
 				<headers_to_exclude>[]</headers_to_exclude>
 			</route>
+			<!-- People (face grouping) UI and API — every user manages their own people -->
+			<route>
+				<url>^/js/people-loader</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/top_menu/people</url>
+				<verb>GET</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
+			<route>
+				<url>^/people/</url>
+				<verb>GET,POST,PUT,DELETE</verb>
+				<access_level>USER</access_level>
+				<headers_to_exclude>[]</headers_to_exclude>
+			</route>
 			<!-- Everything else (backfill, events, OCC, settings) requires admin -->
 			<route>
 				<url>.*</url>
