@@ -18,15 +18,30 @@ from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl, persistent_storage
 
 MAX_ATTEMPTS = 3
+# A job still 'processing' after this long is treated as wedged (dead/blocked worker) and requeued.
+# Must exceed the worst-case single attempt: ffprobe(30s) + 9×ffmpeg(30s) + vision(≤180s) ≈ 8 min.
+STUCK_JOB_TIMEOUT = 900
 _DB = os.path.join(persistent_storage(), "recognize_llm_queue.db")
 _claim_lock = threading.Lock()
 
 
 def _connect() -> sqlite3.Connection:
-    con = sqlite3.connect(_DB, timeout=30)
+    # 60s busy timeout so a brief lock from a concurrent writer (clustering / thumbnail passes) waits
+    # instead of raising OperationalError; WAL + synchronous=NORMAL keep writers short and concurrent.
+    con = sqlite3.connect(_DB, timeout=60)
     con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA busy_timeout=60000")
+    con.execute("PRAGMA synchronous=NORMAL")
     con.row_factory = sqlite3.Row
     return con
+
+
+def _safe_log(nc, msg: str) -> None:
+    """Log to Nextcloud without ever raising — logging failures must not bubble into the worker loop."""
+    try:
+        nc.log(LogLvl.ERROR, msg)
+    except Exception:
+        pass
 
 
 def _add_column(con: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -273,49 +288,104 @@ def _finish(row: sqlite3.Row, status_: str, error: str = "") -> None:
         )
 
 
+def reap_stuck_jobs(max_age: int = STUCK_JOB_TIMEOUT) -> int:
+    """Requeue jobs wedged in 'processing' (dead/blocked worker); fail those out of attempts.
+
+    Runtime counterpart to the startup-only reset in ``init_db``: lets a stalled job self-heal without
+    a container restart. Returns the number of rows reset.
+    """
+    cutoff = int(time.time()) - max_age
+    with _connect() as con:
+        cur = con.execute(
+            "UPDATE jobs SET "
+            "  status=CASE WHEN attempts + 1 < ? THEN 'pending' ELSE 'failed' END, "
+            "  attempts=attempts + 1, "
+            "  error='reaped: stuck in processing', "
+            "  updated_at=? "
+            "WHERE status='processing' AND updated_at < ?",
+            (MAX_ATTEMPTS, int(time.time()), cutoff),
+        )
+        return cur.rowcount
+
+
 class Workers:
-    """Owns the worker threads. ``start()`` is idempotent w.r.t. the configured concurrency."""
+    """Owns the worker threads plus a supervisor that respawns dead workers and reaps stuck jobs."""
 
     def __init__(self):
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
+        self._concurrency = 0
+        self._supervisor: threading.Thread | None = None
 
     def start(self, concurrency: int) -> None:
         self._stop.clear()
-        while len(self._threads) < concurrency:
+        self._concurrency = max(self._concurrency, concurrency)
+        self._ensure_workers()
+        if self._supervisor is None or not self._supervisor.is_alive():
+            self._supervisor = threading.Thread(target=self._supervise, name="recognize-llm-supervisor", daemon=True)
+            self._supervisor.start()
+
+    def _ensure_workers(self) -> None:
+        """Drop dead threads and (re)spawn up to the target concurrency."""
+        self._threads = [t for t in self._threads if t.is_alive()]
+        while len(self._threads) < self._concurrency:
             t = threading.Thread(target=self._loop, name=f"recognize-llm-worker-{len(self._threads)}", daemon=True)
             t.start()
             self._threads.append(t)
+
+    def _supervise(self) -> None:
+        """Every 60s: respawn any worker that died, and requeue jobs wedged in 'processing'."""
+        nc = NextcloudApp()
+        while not self._stop.wait(60):
+            try:
+                before = len([t for t in self._threads if t.is_alive()])
+                self._ensure_workers()
+                if before < self._concurrency:
+                    _safe_log(nc, f"recognize_llm: supervisor respawned worker(s) ({before}/{self._concurrency} alive)")
+                reaped = reap_stuck_jobs()
+                if reaped:
+                    _safe_log(nc, f"recognize_llm: supervisor requeued {reaped} stuck job(s)")
+            except Exception as e:
+                _safe_log(nc, f"recognize_llm: supervisor error: {e}")
 
     def stop(self) -> None:
         self._stop.set()
 
     def _loop(self) -> None:
-        import processor  # lazy import — breaks the job_queue → processor → face_pipeline → job_queue cycle
         nc = NextcloudApp()
         idle = 0.0
         while not self._stop.is_set():
-            row = _claim()
-            if row is None:
-                idle = min(idle + 0.5, 5.0)
-                time.sleep(idle)
-                continue
-            idle = 0.0
+            # Outer guard: a failure in _claim / _finish / logging must NEVER kill the worker thread,
+            # or the (single) worker dies silently and the queue stalls until a container restart.
             try:
-                cfg = settings_mod.load(nc)
-                res = processor.process_file(
-                    nc, row["user_id"], int(row["file_id"]), cfg, force=bool(row["force"])
-                )
-                _finish(row, "done" if res.status in ("done", "skipped") else "failed", res.reason)
-                if res.status == "done" and res.caption:
-                    record_recent(
-                        row["user_id"], int(row["file_id"]),
-                        res.name, res.path,
-                        res.caption.description, res.caption.tags,
-                    )
+                row = _claim()
+                if row is None:
+                    idle = min(idle + 0.5, 5.0)
+                    time.sleep(idle)
+                    continue
+                idle = 0.0
+                self._process_one(nc, row)
             except Exception as e:
-                retry = row["attempts"] + 1 < MAX_ATTEMPTS
-                _finish(row, "pending" if retry else "failed", str(e))
-                nc.log(LogLvl.ERROR, f"recognize_llm: job user={row['user_id']} file={row['file_id']} error: {e}")
-                if retry:
-                    time.sleep(2.0)
+                _safe_log(nc, f"recognize_llm: worker loop error (recovered): {e}")
+                time.sleep(2.0)
+
+    def _process_one(self, nc, row: sqlite3.Row) -> None:
+        import processor
+        try:
+            cfg = settings_mod.load(nc)
+            res = processor.process_file(
+                nc, row["user_id"], int(row["file_id"]), cfg, force=bool(row["force"])
+            )
+            _finish(row, "done" if res.status in ("done", "skipped") else "failed", res.reason)
+            if res.status == "done" and res.caption:
+                record_recent(
+                    row["user_id"], int(row["file_id"]),
+                    res.name, res.path,
+                    res.caption.description, res.caption.tags,
+                )
+        except Exception as e:
+            retry = row["attempts"] + 1 < MAX_ATTEMPTS
+            _finish(row, "pending" if retry else "failed", str(e))
+            _safe_log(nc, f"recognize_llm: job user={row['user_id']} file={row['file_id']} error: {e}")
+            if retry:
+                time.sleep(2.0)
