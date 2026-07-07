@@ -58,8 +58,11 @@ async def api_face_thumb(face_id: int, nc: Annotated[NextcloudApp, Depends(nc_ap
     user = _require_user(nc)
     if not user:
         return Response(status_code=404)
-    nc.set_user(user)  # generation may need to download the file in the owner's context
-    jpeg = face_pipeline.ensure_thumb(nc, user, face_id)
+    # Stored-only: NEVER generate here. Generation downloads from NC, and this request already came
+    # THROUGH NC's proxy — doing a callback per thumbnail deadlocks NC's workers under a gallery-load
+    # flood. Missing crops are produced by the background backfill (main.lifespan); a 404 just lets
+    # the front-end fall back to the file preview.
+    jpeg = face_pipeline.thumb_bytes(user, face_id)
     if not jpeg:
         return Response(status_code=404)
     return Response(content=jpeg, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})

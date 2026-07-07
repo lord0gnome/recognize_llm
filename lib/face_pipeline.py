@@ -511,6 +511,35 @@ def ensure_thumb(nc, user_id: str, face_id: int) -> bytes | None:
         return None
 
 
+def sample_faces_missing_thumbs() -> list[tuple[str, int]]:
+    """(user_id, sample_face_id) for non-ignored persons whose representative face has no crop yet."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT p.user_id, p.sample_face_id FROM face_persons p "
+            "LEFT JOIN face_thumbs t ON t.face_id=p.sample_face_id "
+            "WHERE p.sample_face_id>=0 AND p.ignored=0 AND t.face_id IS NULL"
+        ).fetchall()
+    return [(r["user_id"], r["sample_face_id"]) for r in rows]
+
+
+def backfill_sample_thumbs(nc, pause: float = 0.4) -> int:
+    """Generate crops for person representatives that lack one — SERIAL, background only.
+
+    Safe because it runs one at a time inside the ExApp (a direct ExApp→NC call, not through the
+    proxy), so it can't cause the request-path reentrancy that a per-request generator does.
+    """
+    made = 0
+    for user_id, face_id in sample_faces_missing_thumbs():
+        try:
+            nc.set_user(user_id)
+            if ensure_thumb(nc, user_id, face_id):
+                made += 1
+        except Exception:
+            pass
+        time.sleep(pause)
+    return made
+
+
 def _download_node(nc, file_id: int, tries: int = 3):
     """Resolve a file node by id, retrying the (occasionally flaky under load) WebDAV find."""
     from nc_py_api._exceptions import NextcloudException

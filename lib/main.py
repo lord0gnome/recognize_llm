@@ -31,6 +31,24 @@ workers = job_queue.Workers()
 provider_loop = task_provider.ProviderLoop()
 
 
+def _thumb_backfill_worker() -> None:
+    """Generate missing person-representative crops serially in the background (see face_pipeline)."""
+    import threading, time
+    import face_pipeline
+    from nc_py_api import NextcloudApp
+
+    def _run():
+        time.sleep(90)  # let the app settle after startup before doing any NC I/O
+        try:
+            nc = NextcloudApp()
+            made = face_pipeline.backfill_sample_thumbs(nc)
+            nc.log(LogLvl.INFO, f"recognize_llm: generated {made} missing person thumbnails")
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, name="recognize-llm-thumb-backfill", daemon=True).start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     set_handlers(app, enabled_handler)
@@ -38,6 +56,7 @@ async def lifespan(app: FastAPI):
     # Start the local worker pool + provider loop so a restart resumes any unfinished queue.
     workers.start(int(os.environ.get("CONCURRENCY", "1") or 1))
     provider_loop.start()
+    _thumb_backfill_worker()
     yield
     workers.stop()
     provider_loop.stop()
