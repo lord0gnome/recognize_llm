@@ -21,6 +21,12 @@ MAX_ATTEMPTS = 3
 # A job still 'processing' after this long is treated as wedged (dead/blocked worker) and requeued.
 # Must exceed the worst-case single attempt: ffprobe(30s) + 9×ffmpeg(30s) + vision(≤180s) ≈ 8 min.
 STUCK_JOB_TIMEOUT = 900
+# The worker reuses one NextcloudApp for its lifetime; if its session goes stale (dead keep-alive
+# connection / stale capabilities) EVERY call starts failing (400) or hanging and no job completes.
+# After this many consecutive failures, rebuild the session — a fresh nc is exactly what a container
+# restart used to provide. Cooldown prevents thrashing when Nextcloud itself is genuinely down.
+NC_REFRESH_AFTER_FAILURES = 3
+NC_REFRESH_COOLDOWN = 30
 _DB = os.path.join(persistent_storage(), "recognize_llm_queue.db")
 _claim_lock = threading.Lock()
 
@@ -354,6 +360,8 @@ class Workers:
     def _loop(self) -> None:
         nc = NextcloudApp()
         idle = 0.0
+        fails = 0            # consecutive job failures — a run of these means the nc session went bad
+        last_refresh = 0.0
         while not self._stop.is_set():
             # Outer guard: a failure in _claim / _finish / logging must NEVER kill the worker thread,
             # or the (single) worker dies silently and the queue stalls until a container restart.
@@ -364,12 +372,24 @@ class Workers:
                     time.sleep(idle)
                     continue
                 idle = 0.0
-                self._process_one(nc, row)
+                ok = self._process_one(nc, row)
+                fails = 0 if ok else fails + 1
+                # A streak of failures = poisoned session (every by_id/download 400s or hangs).
+                # Rebuild the NextcloudApp to get fresh connections + capabilities, like a restart does.
+                if fails >= NC_REFRESH_AFTER_FAILURES and (time.time() - last_refresh) > NC_REFRESH_COOLDOWN:
+                    _safe_log(nc, f"recognize_llm: {fails} consecutive failures — refreshing Nextcloud session")
+                    try:
+                        nc = NextcloudApp()
+                    except Exception as e:
+                        _safe_log(nc, f"recognize_llm: session refresh failed: {e}")
+                    last_refresh = time.time()
+                    fails = 0
             except Exception as e:
                 _safe_log(nc, f"recognize_llm: worker loop error (recovered): {e}")
                 time.sleep(2.0)
 
-    def _process_one(self, nc, row: sqlite3.Row) -> None:
+    def _process_one(self, nc, row: sqlite3.Row) -> bool:
+        """Process one job. Returns True if it completed (done/skipped), False on failure."""
         import processor
         try:
             cfg = settings_mod.load(nc)
@@ -383,9 +403,11 @@ class Workers:
                     res.name, res.path,
                     res.caption.description, res.caption.tags,
                 )
+            return res.status in ("done", "skipped")
         except Exception as e:
             retry = row["attempts"] + 1 < MAX_ATTEMPTS
             _finish(row, "pending" if retry else "failed", str(e))
             _safe_log(nc, f"recognize_llm: job user={row['user_id']} file={row['file_id']} error: {e}")
             if retry:
                 time.sleep(2.0)
+            return False
