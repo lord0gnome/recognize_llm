@@ -185,6 +185,17 @@ var CSS = `
 }
 #rlm-dash .rbtn:hover:not(:disabled) { background:rgba(255,107,107,0.28); }
 #rlm-dash .rbtn:disabled { opacity:0.5; cursor:default; }
+#rlm-dash .sbtn {
+  font-size:0.72rem; padding:5px 14px; border-radius:20px; flex-shrink:0;
+  background:rgba(77,171,247,0.12); color:#4dabf7; border:1px solid rgba(77,171,247,0.3);
+  cursor:pointer; transition:all 0.2s;
+}
+#rlm-dash .sbtn:hover:not(:disabled) { background:rgba(77,171,247,0.28); }
+#rlm-dash .sbtn:disabled { opacity:0.5; cursor:default; }
+#rlm-dash .sbtn.running {
+  background:rgba(255,107,107,0.12); color:#ff6b6b; border-color:rgba(255,107,107,0.3);
+}
+#rlm-dash .scanline { font-size:0.72rem; color:#888; margin:-16px 0 20px; }
 #rlm-dash .empty {
   grid-column:1/-1; text-align:center; padding:48px; color:#444; font-size:0.9rem;
 }
@@ -197,7 +208,9 @@ var HTML = `
   <div class="dot" id="rlm-dot"></div>
   <h1>Recognize <span>LLM</span> \xB7 Queue</h1>
   <div class="lup" id="rlm-lup">connecting…</div>
+  <button id="rlm-scan" class="sbtn" style="display:none">Scan library</button>
 </div>
+<div class="scanline" id="rlm-scanline" style="display:none"></div>
 <div class="stats">
   <div class="stat pending">  <div class="snum" id="rlm-pending">—</div>  <div class="slbl">Pending</div></div>
   <div class="stat processing"><div class="snum" id="rlm-processing">—</div><div class="slbl">Processing</div></div>
@@ -239,8 +252,11 @@ function mount() {
 
   var retryBtn = document.getElementById('rlm-retry');
   if (retryBtn) retryBtn.addEventListener('click', retryFailed);
+  var scanBtn = document.getElementById('rlm-scan');
+  if (scanBtn) scanBtn.addEventListener('click', scanToggle);
 
   startPolling();
+  bfPoll();  // shows the scan button only if the admin-only backfill API answers
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -282,6 +298,68 @@ function retryFailed() {
       btn.disabled = false;
       btn.textContent = 'Retry all';
     });
+}
+
+/* ── Library scan (backfill endpoints are admin-only; 403 hides the button) ─ */
+var BF = PROXY + '/backfill';
+var _bfTimer = null;
+
+function updateScan(st) {
+  var btn  = document.getElementById('rlm-scan');
+  var line = document.getElementById('rlm-scanline');
+  if (!btn || !line) return;
+  var c = st.crawl || {};
+  if (c.running) {
+    btn.classList.add('running');
+    btn.textContent = 'Stop scan';
+    var who = c.current_user ? ' (' + c.current_user + ')' : '';
+    line.style.display = 'block';
+    line.textContent = 'Scanning all users for untagged media — user ' +
+      c.users_done + '/' + c.users_total + who + ', ' + fmt(c.enqueued || 0) + ' queued so far';
+  } else {
+    btn.classList.remove('running');
+    btn.textContent = 'Scan library';
+    if (c.error) {
+      line.style.display = 'block';
+      line.textContent = 'Scan failed: ' + c.error;
+    } else if (c.enqueued) {
+      line.style.display = 'block';
+      line.textContent = 'Last scan queued ' + fmt(c.enqueued) + ' file(s) across ' +
+        c.users_done + ' user(s). Already-described files are skipped automatically.';
+    } else {
+      line.style.display = 'none';
+    }
+  }
+}
+
+function bfPoll() {
+  fetch(BF + '/status', {credentials:'same-origin'})
+    .then(function(r) { if (!r.ok) throw 0; return r.json(); })
+    .then(function(st) {
+      var btn = document.getElementById('rlm-scan');
+      if (btn) btn.style.display = 'block';
+      updateScan(st);
+      var running = (st.crawl || {}).running;
+      if (running && !_bfTimer) _bfTimer = setInterval(bfPoll, 3000);
+      if (!running && _bfTimer) { clearInterval(_bfTimer); _bfTimer = null; }
+    })
+    .catch(function() {});  // non-admin (or proxy error): button stays hidden
+}
+
+function scanToggle() {
+  var btn = document.getElementById('rlm-scan');
+  if (!btn || btn.disabled) return;
+  var stopping = btn.classList.contains('running');
+  btn.disabled = true;
+  fetch(BF + (stopping ? '/stop' : '/start'), {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: {'Content-Type': 'application/json'},
+    body: '{}',
+  })
+    .then(function(r) { return r.json(); })
+    .then(function() { btn.disabled = false; bfPoll(); if (_poll) _poll(); })
+    .catch(function() { btn.disabled = false; });
 }
 
 /* ── Stats update ────────────────────────────────────────────────────────── */
