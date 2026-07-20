@@ -292,7 +292,24 @@ def set_person_name(nc, user_id: str, person_id: int, name: str) -> dict:
     if not row:
         return {"error": "no such person"}
     name = name.strip()
-    tag = _ensure_person_tag(nc, user_id, person_id, name, row["tag_id"])
+    old_tag_id = row["tag_id"]
+    tag = _ensure_person_tag(nc, user_id, person_id, name, old_tag_id)
+    if tag is None:
+        return {"error": "could not create or resolve tag"}
+    # When the resolved tag differs from this person's previous tag, the rename collided with an
+    # already-existing tag of the same name (the same person split across clusters, or another user
+    # who already used this name), so `_ensure_person_tag` resolved to that shared tag instead of
+    # renaming ours in place. Renaming preserves file assignments; resolving to a *different* tag
+    # does not — so mirror merge/split and move this person's files onto it, then drop our now-orphan
+    # internal tag. Without this the named tag would carry none of the user's photos (invisible/empty
+    # in the Files UI).
+    if tag.tag_id != old_tag_id:
+        for fid in _person_file_ids(user_id, person_id):
+            _assign_tag_id(nc, fid, tag.tag_id)
+        # Drop the old tag only if it was this person's private tag — never one another person (of
+        # any user) still points at, or we'd strip a shared name-tag off everyone else's photos.
+        if old_tag_id is not None and old_tag_id >= 0 and not _tag_shared_with_others(user_id, person_id, old_tag_id):
+            _delete_tag(nc, old_tag_id)
     with _connect() as con:
         con.execute(
             "UPDATE face_persons SET name=?, tag_id=?, updated_at=? WHERE user_id=? AND person_id=?",
@@ -703,6 +720,20 @@ def _person_file_ids(user_id: str, person_id: int) -> list[int]:
             (user_id, person_id),
         ).fetchall()
     return [r["file_id"] for r in rows]
+
+
+def _tag_shared_with_others(user_id: str, person_id: int, tag_id: int) -> bool:
+    """True if any person other than *(user_id, person_id)* still points at *tag_id*.
+
+    Named tags are global (``person:<name>``), so the same tag can back several clusters/users. Only
+    delete a tag once nobody else references it, or we'd strip it off everyone else's photos.
+    """
+    with _connect() as con:
+        row = con.execute(
+            "SELECT 1 FROM face_persons WHERE tag_id=? AND NOT (user_id=? AND person_id=?) LIMIT 1",
+            (tag_id, user_id, person_id),
+        ).fetchone()
+    return row is not None
 
 
 def _files_of_faces(user_id: str, face_ids: list[int]) -> list[int]:
