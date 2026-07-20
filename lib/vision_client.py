@@ -34,6 +34,14 @@ class VisionError(RuntimeError):
     """Raised when the vision endpoint fails or returns unusable output."""
 
 
+class VisionUnavailable(VisionError):
+    """The vision backend is down (connection refused/timeout or 5xx).
+
+    An infrastructure outage, not a problem with the job: the worker requeues the
+    job without burning an attempt and pauses the queue until the backend answers.
+    """
+
+
 def _data_url(image: bytes, mimetype: str) -> str:
     mt = mimetype if (mimetype or "").startswith("image/") else "image/jpeg"
     return f"data:{mt};base64,{base64.b64encode(image).decode('ascii')}"
@@ -80,9 +88,16 @@ class VisionClient:
     def __init__(self, settings: Settings):
         self._s = settings
 
-    def caption(self, image: bytes, mimetype: str, is_video: bool = False) -> Caption:
+    def caption(self, image: bytes, mimetype: str, is_video: bool = False, location: str = "") -> Caption:
         from settings import DEFAULT_VIDEO_PROMPT_PREFIX
         prompt = (DEFAULT_VIDEO_PROMPT_PREFIX + self._s.prompt) if is_video else self._s.prompt
+        if location:
+            prompt += (
+                "\n\nLocation context from the photo's GPS metadata: " + location + ". "
+                "Use it to identify the specific place, landmark, or city: name it in the "
+                "description when it is consistent with what the image shows, and include "
+                "relevant place tags. Do not contradict clearly visible evidence."
+            )
         payload = {
             "messages": [
                 {
@@ -109,6 +124,14 @@ class VisionClient:
             with httpx.Client(transport=transport, timeout=self._s.request_timeout) as client:
                 resp = client.post(self._s.chat_url, json=payload, headers=headers)
             resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (502, 503, 504):
+                raise VisionUnavailable(f"Vision backend {self._s.chat_url} down: HTTP {e.response.status_code}") from e
+            raise VisionError(f"Vision request to {self._s.chat_url} failed: {e}") from e
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # Can't even reach the server — never this job's fault. Read/write timeouts on an
+            # established connection stay job failures (a pathological input must burn attempts).
+            raise VisionUnavailable(f"Vision backend {self._s.chat_url} unreachable: {e}") from e
         except httpx.HTTPError as e:
             raise VisionError(f"Vision request to {self._s.chat_url} failed: {e}") from e
 

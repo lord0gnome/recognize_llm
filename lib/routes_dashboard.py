@@ -6,7 +6,7 @@ import os
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import nc_app
@@ -38,6 +38,56 @@ async def api_retry_failed(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict
     return {"reset": count}
 
 
+# ── Admin variants: every user's queue at once ────────────────────────────────
+# No app-side admin check needed: these paths match none of the USER routes in
+# info.xml, so AppAPI's catch-all ADMIN route 403s non-admins before proxying
+# (same mechanism that gates /backfill). The frontend probes /all/status and
+# falls back to the per-user endpoints on 403.
+
+@router.get("/dashboard/api/all/status")
+async def api_all_status(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
+    out = job_queue.status(user_id=None)
+    out["by_user"] = job_queue.status_by_user()
+    return out
+
+
+@router.get("/dashboard/api/all/recent")
+async def api_all_recent(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> list:
+    return job_queue.get_recent(20, user_id=None)
+
+
+@router.post("/dashboard/api/all/retry-failed")
+async def api_all_retry_failed(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
+    return {"reset": job_queue.retry_failed(user_id=None)}
+
+
+@router.get("/dashboard/api/all/thumb")
+async def api_all_thumb(
+    nc: Annotated[NextcloudApp, Depends(nc_app)],
+    user: str,
+    file_id: int,
+    x: int = 260,
+    y: int = 195,
+) -> Response:
+    """Preview of any user's file, fetched in the owner's context.
+
+    The browser can't use NC's /core/preview for this: it runs with the admin's
+    session, and NC admins have no filesystem access to other users' files (404).
+    The app impersonates the owner instead — same mechanism the processor uses.
+    Non-2xx passes through so the card's onerror fallback shows the placeholder.
+    """
+    nc.set_user(user)
+    r = nc._session.adapter.get(
+        f"/index.php/core/preview?fileId={int(file_id)}&x={int(x)}&y={int(y)}&a=true&forceIcon=0"
+    )
+    return Response(
+        content=r.content if r.status_code == 200 else b"",
+        status_code=r.status_code,
+        media_type=r.headers.get("content-type", "image/jpeg"),
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
 # ── Loader JS — runs inline in NC's embedded page, no iframe needed ───────────
 # NC sets frame-ancestors 'none' on all proxy responses, so we can't use an
 # iframe. Instead this script injects the full dashboard UI directly into #content.
@@ -49,6 +99,10 @@ _LOADER_JS = r"""
 var PROXY  = window.location.origin + '/index.php/apps/app_api/proxy/__APP_ID__';
 var API    = PROXY + '/dashboard/api';
 var _poll  = null;
+
+/* Admins get the /all variants (every user's queue); AppAPI 403s non-admins. */
+var ADMIN  = false;
+function api(p) { return API + (ADMIN ? '/all' : '') + p; }
 
 /* ── Scoped CSS ──────────────────────────────────────────────────────────── */
 var CSS = `
@@ -80,6 +134,31 @@ var CSS = `
   50%     { transform:scale(1.4); opacity:0.6; }
 }
 #rlm-dash .lup { margin-left: auto; font-size: 0.75rem; color: #666; }
+#rlm-dash .badge {
+  font-size:0.6rem; text-transform:uppercase; letter-spacing:1px; font-weight:600;
+  padding:3px 10px; border-radius:20px; background:rgba(77,171,247,0.12);
+  color:#4dabf7; border:1px solid rgba(77,171,247,0.3);
+}
+
+#rlm-dash .byuser {
+  background:#25262b; border-radius:8px; border:1px solid #2c2d32;
+  padding:6px 16px; margin:-12px 0 24px;
+}
+#rlm-dash .burow {
+  display:flex; gap:14px; align-items:baseline; padding:6px 0;
+  border-bottom:1px solid #2c2d32; font-size:0.75rem;
+}
+#rlm-dash .burow:last-child { border-bottom:none; }
+#rlm-dash .buname {
+  font-weight:600; color:#fff; flex:1; min-width:0;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+#rlm-dash .bunum { color:#666; flex-shrink:0; }
+#rlm-dash .bunum b { font-weight:600; }
+#rlm-dash .bupend b { color:#adb5bd; }
+#rlm-dash .buproc b { color:#4dabf7; }
+#rlm-dash .budone b { color:#51cf66; }
+#rlm-dash .bufail b { color:#ff6b6b; }
 
 #rlm-dash .stats {
   display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 24px;
@@ -207,6 +286,7 @@ var HTML = `
 <div class="hdr">
   <div class="dot" id="rlm-dot"></div>
   <h1>Recognize <span>LLM</span> \xB7 Queue</h1>
+  <span class="badge" id="rlm-badge" style="display:none">all users</span>
   <div class="lup" id="rlm-lup">connecting…</div>
   <button id="rlm-scan" class="sbtn" style="display:none">Scan library</button>
 </div>
@@ -219,6 +299,7 @@ var HTML = `
     <button id="rlm-retry" class="rbtn" style="display:none">Retry all</button>
   </div>
 </div>
+<div class="byuser" id="rlm-byuser" style="display:none"></div>
 <div class="pwrap">
   <div class="plbl"><span id="rlm-plbl">Loading…</span><span id="rlm-ppct">—</span></div>
   <div class="pbar"><div class="pfill" id="rlm-pfill" style="width:0%"></div></div>
@@ -255,8 +336,18 @@ function mount() {
   var scanBtn = document.getElementById('rlm-scan');
   if (scanBtn) scanBtn.addEventListener('click', scanToggle);
 
-  startPolling();
-  bfPoll();  // shows the scan button only if the admin-only backfill API answers
+  // Probe the admin-only /all endpoints first; a 403 means regular user.
+  fetch(API + '/all/status', {credentials:'same-origin'})
+    .then(function(r) { ADMIN = r.ok; })
+    .catch(function() {})
+    .then(function() {
+      if (ADMIN) {
+        var b = document.getElementById('rlm-badge');
+        if (b) b.style.display = 'inline-block';
+      }
+      startPolling();
+      bfPoll();  // shows the scan button only if the admin-only backfill API answers
+    });
 }
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
@@ -287,7 +378,7 @@ function retryFailed() {
   if (!btn || btn.disabled) return;
   btn.disabled = true;
   btn.textContent = '…';
-  fetch(API + '/retry-failed', {method:'POST', credentials:'same-origin'})
+  fetch(api('/retry-failed'), {method:'POST', credentials:'same-origin'})
     .then(function(r) { return r.json(); })
     .then(function() {
       btn.disabled = false;
@@ -385,13 +476,39 @@ function updateStats(s) {
   if (pl) pl.textContent = fmt(done) + ' / ' + fmt(total) + ' images processed';
   var rb = document.getElementById('rlm-retry');
   if (rb) rb.style.display = (s.failed || 0) > 0 ? 'block' : 'none';
+  updateByUser(s.by_user);
+}
+
+/* ── Per-user breakdown (admin only — /all/status includes by_user) ──────── */
+function esc(s) { return String(s).replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function updateByUser(list) {
+  var box = document.getElementById('rlm-byuser');
+  if (!box) return;
+  if (!list || !list.length) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = list.map(function(u) {
+    return '<div class="burow">' +
+      '<span class="buname">' + esc(u.user_id) + '</span>' +
+      '<span class="bunum bupend"><b>' + fmt(u.pending) + '</b> pending</span>' +
+      '<span class="bunum buproc"><b>' + fmt(u.processing) + '</b> processing</span>' +
+      '<span class="bunum budone"><b>' + fmt(u.done) + '</b> done</span>' +
+      '<span class="bunum bufail"><b>' + fmt(u.failed) + '</b> failed</span>' +
+      '</div>';
+  }).join('');
 }
 
 /* ── Cards ───────────────────────────────────────────────────────────────── */
 var knownIds = new Set();
 
 function makeCard(item, isNew) {
-  var thumbUrl = '/index.php/core/preview?fileId=' + item.file_id + '&x=260&y=195&a=true&forceIcon=0';
+  // Own files: NC's preview endpoint (browser-cached, no proxy hop). Other users'
+  // files 404 there even for admins, so admin mode fetches through the app, which
+  // impersonates the file owner.
+  var thumbUrl = ADMIN
+    ? PROXY + '/dashboard/api/all/thumb?user=' + encodeURIComponent(item.user_id) +
+      '&file_id=' + item.file_id + '&x=260&y=195'
+    : '/index.php/core/preview?fileId=' + item.file_id + '&x=260&y=195&a=true&forceIcon=0';
   var name = item.name || ('File #' + item.file_id);
   var tags = item.tags || [];
 
@@ -468,8 +585,8 @@ function updateRecent(items) {
 function startPolling() {
   function poll() {
     Promise.all([
-      fetch(API + '/status', {credentials:'same-origin'}).then(function(r){return r.json();}),
-      fetch(API + '/recent', {credentials:'same-origin'}).then(function(r){return r.json();}),
+      fetch(api('/status'), {credentials:'same-origin'}).then(function(r){return r.json();}),
+      fetch(api('/recent'), {credentials:'same-origin'}).then(function(r){return r.json();}),
     ]).then(function(results) {
       updateStats(results[0]);
       updateRecent(results[1]);

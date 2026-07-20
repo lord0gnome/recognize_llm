@@ -42,6 +42,17 @@ def _connect() -> sqlite3.Connection:
     return con
 
 
+def _vision_reachable(chat_url: str) -> bool:
+    """True if the vision endpoint answers at the HTTP level (any status counts —
+    a 404/405 on GET still proves the server is up; only transport errors mean down)."""
+    import httpx
+    try:
+        httpx.get(chat_url, timeout=5)
+        return True
+    except httpx.TransportError:
+        return False
+
+
 def _safe_log(nc, msg: str) -> None:
     """Log to Nextcloud without ever raising — logging failures must not bubble into the worker loop."""
     try:
@@ -209,6 +220,27 @@ def status(user_id: str | None = None) -> dict:
     }
 
 
+def status_by_user() -> list[dict]:
+    """Per-user job counts, busiest queues first (admin dashboard)."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT user_id, status, COUNT(*) c FROM jobs GROUP BY user_id, status"
+        ).fetchall()
+    per: dict[str, dict] = {}
+    for r in rows:
+        u = per.setdefault(
+            r["user_id"],
+            {"user_id": r["user_id"], "pending": 0, "processing": 0, "done": 0, "failed": 0},
+        )
+        u[r["status"]] = r["c"]
+    for u in per.values():
+        u["total"] = u["pending"] + u["processing"] + u["done"] + u["failed"]
+    return sorted(
+        per.values(),
+        key=lambda u: (-(u["pending"] + u["processing"] + u["failed"]), u["user_id"]),
+    )
+
+
 def record_recent(user_id: str, file_id: int, name: str, path: str, description: str, tags: list[str]) -> None:
     with _connect() as con:
         con.execute(
@@ -285,6 +317,17 @@ def _claim() -> sqlite3.Row | None:
         return row
 
 
+def _requeue(row: sqlite3.Row) -> None:
+    """Put a claimed job back to pending WITHOUT burning an attempt (infrastructure outage,
+    not a job problem). Bumping updated_at sends it to the back of the queue, so one
+    backend-crashing file rotates behind every other pending job instead of head-blocking."""
+    with _connect() as con:
+        con.execute(
+            "UPDATE jobs SET status='pending', updated_at=? WHERE user_id=? AND file_id=?",
+            (int(time.time()), row["user_id"], row["file_id"]),
+        )
+
+
 def _finish(row: sqlite3.Row, status_: str, error: str = "") -> None:
     with _connect() as con:
         con.execute(
@@ -322,6 +365,7 @@ class Workers:
         self._threads: list[threading.Thread] = []
         self._concurrency = 0
         self._supervisor: threading.Thread | None = None
+        self._outage_reason = ""
 
     def start(self, concurrency: int) -> None:
         self._stop.clear()
@@ -372,7 +416,16 @@ class Workers:
                     time.sleep(idle)
                     continue
                 idle = 0.0
-                ok = self._process_one(nc, row)
+                result = self._process_one(nc, row)
+                if result == "vision_down":
+                    # Backend outage: the job went back to pending un-burned. Without this
+                    # pause the queue becomes a failure carousel — every job does an
+                    # expensive download+ffmpeg pass just to fail at the vision call, and
+                    # after MAX_ATTEMPTS passes the whole queue lands in 'failed'
+                    # (the "queue is stuck until someone clicks Retry" pattern).
+                    self._wait_for_vision(nc)
+                    continue
+                ok = result == "ok"
                 fails = 0 if ok else fails + 1
                 # A streak of failures = poisoned session (every by_id/download 400s or hangs).
                 # Rebuild the NextcloudApp to get fresh connections + capabilities, like a restart does.
@@ -388,9 +441,10 @@ class Workers:
                 _safe_log(nc, f"recognize_llm: worker loop error (recovered): {e}")
                 time.sleep(2.0)
 
-    def _process_one(self, nc, row: sqlite3.Row) -> bool:
-        """Process one job. Returns True if it completed (done/skipped), False on failure."""
+    def _process_one(self, nc, row: sqlite3.Row) -> str:
+        """Process one job. Returns "ok" (done/skipped), "fail", or "vision_down" (backend outage)."""
         import processor
+        from vision_client import VisionUnavailable
         try:
             cfg = settings_mod.load(nc)
             res = processor.process_file(
@@ -403,11 +457,31 @@ class Workers:
                     res.name, res.path,
                     res.caption.description, res.caption.tags,
                 )
-            return res.status in ("done", "skipped")
+            return "ok" if res.status in ("done", "skipped") else "fail"
+        except VisionUnavailable as e:
+            _requeue(row)
+            self._outage_reason = str(e)
+            return "vision_down"
         except Exception as e:
             retry = row["attempts"] + 1 < MAX_ATTEMPTS
             _finish(row, "pending" if retry else "failed", str(e))
             _safe_log(nc, f"recognize_llm: job user={row['user_id']} file={row['file_id']} error: {e}")
             if retry:
                 time.sleep(2.0)
-            return False
+            return "fail"
+
+    def _wait_for_vision(self, nc) -> None:
+        """Hold this worker while the vision backend is down; cheap probe until it answers."""
+        delay = 15.0
+        _safe_log(nc, f"recognize_llm: vision backend down — pausing queue ({self._outage_reason})")
+        while not self._stop.is_set():
+            if self._stop.wait(delay):
+                return
+            try:
+                cfg = settings_mod.load(nc)
+                if _vision_reachable(cfg.chat_url):
+                    _safe_log(nc, "recognize_llm: vision backend reachable again — resuming queue")
+                    return
+            except Exception:
+                pass  # can't even load settings (NC down too?) — keep waiting
+            delay = min(delay * 2, 300.0)

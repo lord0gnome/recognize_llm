@@ -35,7 +35,10 @@ Tags must be lowercase. Do not output anything outside the JSON object.\
 _KEYS: dict[str, tuple[str, str]] = {
     # Base URL of the OpenAI-compatible endpoint. May or may not already include the `/v1` suffix
     # (Ollama is typically `http://host:11434/v1`; raw llama.cpp is typically `http://host:8080`).
-    "llama_url": ("LLAMA_URL", "http://192.168.0.143:11434/v1"),
+    # host.containers.internal: the llama server runs on the same host as this container.
+    # The host's LAN IP does NOT work from inside a bridge-networked rootless container
+    # (pasta-published ports refuse hairpin connections); this alias always resolves.
+    "llama_url": ("LLAMA_URL", "http://host.containers.internal:11434/v1"),
     # Required for Ollama; for single-model llama.cpp servers it may be left empty.
     "llama_model": ("LLAMA_MODEL", ""),
     "api_key": ("LLAMA_API_KEY", ""),
@@ -52,6 +55,16 @@ _KEYS: dict[str, tuple[str, str]] = {
     # Cosine similarity (0–1) required to fold a face into an existing person, both for real-time
     # matching on upload and as the DBSCAN neighbourhood (eps = 1 − this). Higher = stricter/purer.
     "face_match_min_similarity": ("FACE_MATCH_MIN_SIMILARITY", "0.5"),
+    # GPS → place names: adds location tags and gives the model geographic context.
+    "geotag": ("GEOTAG", "yes"),
+    # Reverse-geocoding endpoint. Default is the public OSM instance (1 req/s, results
+    # cached forever in the queue DB); point at a self-hosted Nominatim to keep photo
+    # coordinates entirely local.
+    "nominatim_url": ("NOMINATIM_URL", "https://nominatim.openstreetmap.org"),
+    # Overpass endpoint for the nearest-landmark lookup (reverse geocoding alone can't
+    # name a landmark the photo was taken NEAR). Empty disables landmark search.
+    # No settings-UI field — configurable via env/appconfig for self-hosters.
+    "overpass_url": ("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
 }
 
 
@@ -71,6 +84,9 @@ class Settings:
     face_clustering: bool
     face_min_samples: int
     face_match_min_similarity: float
+    geotag: bool
+    nominatim_url: str
+    overpass_url: str
 
     @property
     def chat_url(self) -> str:
@@ -118,4 +134,7 @@ def load(nc: NextcloudApp) -> Settings:
         face_clustering=str(r["face_clustering"]).lower() in ("1", "yes", "true", "on"),
         face_min_samples=max(2, int(r["face_min_samples"] or 3)),
         face_match_min_similarity=min(0.95, max(0.1, float(r["face_match_min_similarity"] or 0.5))),
+        geotag=str(r["geotag"]).lower() in ("1", "yes", "true", "on"),
+        nominatim_url=r["nominatim_url"].strip() or "https://nominatim.openstreetmap.org",
+        overpass_url=r["overpass_url"].strip(),
     )

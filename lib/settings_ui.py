@@ -159,6 +159,30 @@ def _form() -> SettingsForm:
                     "min_samples). Lower finds more (smaller) people but with more false groupings."
                 ),
             ),
+            # ── Location (GPS) ───────────────────────────────────────────────
+            SettingsField(
+                id="geotag",
+                title="Use photo GPS for location tags and context",
+                type=SettingsFieldType.CHECKBOX,
+                default=True,
+                description=(
+                    "Reads GPS coordinates from photo EXIF, reverse-geocodes them to place and "
+                    "landmark names, adds those as tags, and tells the vision model where the photo "
+                    "was taken so descriptions can name the actual place."
+                ),
+            ),
+            SettingsField(
+                id="nominatim_url",
+                title="Nominatim server",
+                type=SettingsFieldType.URL,
+                default="https://nominatim.openstreetmap.org",
+                description=(
+                    "Reverse-geocoding endpoint. The default is the public OpenStreetMap instance "
+                    "(rate-limited to 1 request/s; results are cached forever, so steady-state "
+                    "traffic is minimal). Point this at a self-hosted Nominatim to keep photo "
+                    "coordinates entirely on your network."
+                ),
+            ),
             SettingsField(
                 id="face_match_min_similarity",
                 title="Face match strictness (0–1)",

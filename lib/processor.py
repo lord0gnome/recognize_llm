@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import face_pipeline
+import geo
 import storage
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl
@@ -58,7 +59,17 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     else:
         image_bytes = raw_bytes
 
-    caption = VisionClient(settings).caption(image_bytes, mimetype, is_video=is_video)
+    # GPS → place names: context for the model plus deterministic location tags.
+    # Videos are skipped (frame grids carry no EXIF; container GPS atoms are rare).
+    location = None if is_video else geo.locate(raw_bytes, settings)
+
+    caption = VisionClient(settings).caption(
+        image_bytes, mimetype, is_video=is_video,
+        location=location.context() if location else "",
+    )
+    for tag in location.tags() if location else []:
+        if tag not in caption.tags:
+            caption.tags.append(tag)
     storage.write_results(nc, node, caption, settings)
     storage.set_marker(nc, node)
     nc.log(LogLvl.INFO, f"recognize_llm: tagged {node.user_path} with {caption.tags}")
