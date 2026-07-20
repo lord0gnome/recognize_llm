@@ -1,3 +1,11 @@
+> ⚠️ **DEPRECATED — do not apply.** Upload detection no longer depends on this core patch. The app
+> now uses Nextcloud core **webhooks** (`webhook_listeners`) plus a periodic backstop scan
+> ([`lib/file_events.py`](../../lib/file_events.py)), neither of which touches app_api's files, so
+> nothing here needs restoring after an `app:update app_api`. Kept only as a record of the old
+> approach and why it was abandoned (the patch was silently wiped by every app_api update). To move
+> off it: `occ app:enable webhook_listeners`, set `WEBHOOK_EXAPP_URL`, and re-enable the exApp — then
+> optionally `DELETE FROM oc_ex_event_handlers WHERE appid='recognize_llm';` to drop the stale row.
+
 # app_api 33.0.0 events_listener patch (captured from prod cloud.morill.es)
 
 app_api 33.0.0 declares POST /api/v1/events_listener but ships no implementation, so the exApp's

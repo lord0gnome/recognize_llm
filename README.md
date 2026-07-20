@@ -17,8 +17,14 @@ Original image files are **never modified**. The app also registers a **TaskProc
 
 One vision engine ([`lib/processor.py`](lib/processor.py)), three entry points:
 
-1. **Uploads** — AppAPI pushes `NodeCreatedEvent`/`NodeWrittenEvent` to `/events/node`
-   ([`lib/routes_events.py`](lib/routes_events.py)) → enqueue.
+1. **Uploads** — detected two update-proof ways ([`lib/file_events.py`](lib/file_events.py)), neither
+   depending on AppAPI internals:
+   - **NC core webhooks** (`webhook_listeners`) POST `NodeCreatedEvent`/`NodeWrittenEvent` to the
+     secret-verified `/events/webhook` ([`lib/routes_events.py`](lib/routes_events.py)) → enqueue.
+     Instant. The exApp registers/tears these down itself on enable/disable.
+   - **A periodic backstop scan** enqueues each user's newly-modified media (per-user etag/mtime
+     watermark) so detection keeps working even if the webhook path is off. Depends on nothing
+     outside the exApp.
 2. **Backfill** — `POST /backfill/start` crawls each user's images and enqueues them
    ([`lib/routes_backfill.py`](lib/routes_backfill.py)); resumable via a per-file etag marker.
 3. **TaskProcessing** — background loop pulls tasks and captions them
@@ -26,6 +32,12 @@ One vision engine ([`lib/processor.py`](lib/processor.py)), three entry points:
 
 A persistent SQLite queue + worker pool ([`lib/job_queue.py`](lib/job_queue.py)) drains jobs at a
 controlled concurrency so the local model is never flooded, and survives restarts.
+
+> **Why not AppAPI's `events_listener`?** AppAPI added a file-event API in 2.4.0 but **dropped it in
+> the 33.x rewrite** — 33/34 declare no such endpoint (verified against `stable33`/`stable34`/`main`).
+> The old `appapi-patches/` restored it by editing app_api's core files, but every
+> `occ app:update app_api` wiped the patch and silently killed upload detection. The webhook + poll
+> design above replaces that patch entirely; `appapi-patches/` is deprecated.
 
 ## Prerequisites
 
@@ -35,9 +47,17 @@ controlled concurrency so the local model is never flooded, and survives restart
   ```
 - Nextcloud with **AppAPI** installed and a deploy daemon registered. In `nextcloud-docker-dev` the
   `appapi-dsp` proxy is already in `docker-compose.yml`.
+- For **instant** upload detection, Nextcloud's core **`webhook_listeners`** app enabled
+  (`occ app:enable webhook_listeners`) and `WEBHOOK_EXAPP_URL` set to the URL NC uses to reach the
+  exApp (see Configuration). Without it, uploads are still detected by the periodic backstop scan
+  (just not instantly).
 
 > The vision endpoint must be reachable **from the exApp container**. Use the container-network host
 > (e.g. `http://host.docker.internal:8080` or the host gateway IP), not `localhost`.
+>
+> Conversely, `WEBHOOK_EXAPP_URL` must let **Nextcloud reach the exApp**: for a `manual_install`
+> daemon that's the LAN `http://<host>:<hostPort>` the daemon is registered with; for a
+> docker-network daemon it's `http://<container-name>:<APP_PORT>`. No trailing `/events/webhook`.
 
 ## Configuration
 
@@ -55,6 +75,11 @@ Settings live in Nextcloud app-config and can be seeded via environment variable
 | concurrency | `CONCURRENCY` | `1` |
 | request_timeout | `REQUEST_TIMEOUT` | `180` |
 | write_comment | `WRITE_COMMENT` | `yes` |
+| webhook_enabled | `WEBHOOK_ENABLED` | `yes` |
+| webhook_exapp_url | `WEBHOOK_EXAPP_URL` | _(empty — required for instant detection)_ |
+| webhook_secret | `WEBHOOK_SECRET` | _(auto-generated on first enable)_ |
+| poll_enabled | `POLL_ENABLED` | `yes` |
+| poll_interval | `POLL_INTERVAL` | `900` _(seconds)_ |
 
 ## Build & register (dev)
 

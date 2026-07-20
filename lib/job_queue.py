@@ -175,6 +175,17 @@ def init_db() -> None:
             )
             """
         )
+        # Per-user high-water mark for the periodic backstop scan (lib/file_events.PollLoop):
+        # the newest file mtime we've already enqueued for a user, so each scan only picks up
+        # genuinely new files instead of re-walking the whole library every cycle.
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scan_state (
+                user_id    TEXT PRIMARY KEY,
+                last_mtime INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         # Any job left in 'processing' on startup is orphaned (container died mid-job).
         # Reset them so workers pick them up again.
         con.execute(
@@ -200,6 +211,37 @@ def enqueue(user_id: str, file_id: int, source: str = "manual", force: bool = Fa
             """,
             (user_id, int(file_id), source, 1 if force else 0, int(time.time())),
         )
+
+
+def get_scan_watermark(user_id: str) -> int | None:
+    """Newest file mtime already scanned for *user_id*, or None if never scanned."""
+    with _connect() as con:
+        row = con.execute(
+            "SELECT last_mtime FROM scan_state WHERE user_id=?", (user_id,)
+        ).fetchone()
+    return int(row["last_mtime"]) if row else None
+
+
+def set_scan_watermark(user_id: str, last_mtime: int) -> None:
+    """Advance (never lower) the per-user backstop-scan high-water mark."""
+    with _connect() as con:
+        con.execute(
+            "INSERT INTO scan_state (user_id, last_mtime) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET last_mtime=MAX(scan_state.last_mtime, excluded.last_mtime)",
+            (user_id, int(last_mtime)),
+        )
+
+
+def known_user_ids() -> list[str]:
+    """Every user we've ever queued, scanned, or extracted a face for — the backstop scan's user
+    set when the provisioning (users) scope isn't available to enumerate all accounts."""
+    with _connect() as con:
+        rows = con.execute(
+            "SELECT user_id FROM jobs "
+            "UNION SELECT user_id FROM scan_state "
+            "UNION SELECT user_id FROM face_embeddings"
+        ).fetchall()
+    return [r["user_id"] for r in rows]
 
 
 def status(user_id: str | None = None) -> dict:

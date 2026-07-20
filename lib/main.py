@@ -11,6 +11,7 @@ from typing import Annotated
 from nc_py_api.ex_app import persistent_storage as _ps
 os.environ.setdefault("INSIGHTFACE_HOME", _ps())
 
+import file_events
 import job_queue
 import routes_backfill
 import routes_dashboard
@@ -24,11 +25,9 @@ from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import AppAPIAuthMiddleware, LogLvl, nc_app, run_app, set_handlers
 from nc_py_api.files import ActionFileInfoEx
 
-EVENTS_LISTENER_PATH = "/events/node"
-_AE_EVENTS_URL = "/ocs/v1.php/apps/app_api/api/v1/events_listener"
-
 workers = job_queue.Workers()
 provider_loop = task_provider.ProviderLoop()
+poll_loop = file_events.PollLoop()
 
 
 def _thumb_backfill_worker() -> None:
@@ -56,14 +55,18 @@ async def lifespan(app: FastAPI):
     # Start the local worker pool + provider loop so a restart resumes any unfinished queue.
     workers.start(int(os.environ.get("CONCURRENCY", "1") or 1))
     provider_loop.start()
+    poll_loop.start()  # backstop new-file detection; survives restarts without a re-enable
     _thumb_backfill_worker()
     yield
     workers.stop()
     provider_loop.stop()
+    poll_loop.stop()
 
 
 APP = FastAPI(lifespan=lifespan)
-APP.add_middleware(AppAPIAuthMiddleware)
+# Exempt the core-webhook receiver from AppAPI auth: NC core (webhook_listeners) calls it directly,
+# not through the AppAPI proxy, so it carries our shared-secret header instead of a request signature.
+APP.add_middleware(AppAPIAuthMiddleware, disable_for=[file_events.WEBHOOK_PATH.lstrip("/")])
 APP.include_router(routes_events.router)
 APP.include_router(routes_backfill.router)
 APP.include_router(routes_dashboard.router)
@@ -82,29 +85,16 @@ async def describe_now(
     return responses.Response()
 
 
-def _register_events_listener(nc: NextcloudApp) -> None:
-    nc.ocs(
-        "POST",
-        _AE_EVENTS_URL,
-        json={
-            "eventType": "node_event",
-            "actionHandler": EVENTS_LISTENER_PATH,
-            "eventSubtypes": ["NodeCreatedEvent", "NodeWrittenEvent"],
-        },
-    )
-
-
-def _unregister_events_listener(nc: NextcloudApp) -> None:
-    nc.ocs("DELETE", _AE_EVENTS_URL, params={"eventType": "node_event"})
-
-
 def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
     try:
         if enabled:
             cfg = settings_mod.load(nc)
             settings_ui.register(nc)
             task_provider.register(nc)
-            _register_events_listener(nc)
+            # New-file detection: NC core webhooks (instant) + a periodic backstop scan. Replaces
+            # the old AppAPI events_listener, which AppAPI 33/34 no longer ship (see file_events).
+            file_events.register_webhooks(nc, cfg)
+            poll_loop.start()
             nc.ui.files_dropdown_menu.register_ex(
                 "recognize_llm_describe", "Describe with AI", "/describe_now",
                 mime="image", icon="img/icon.svg",
@@ -143,7 +133,8 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
         else:
             settings_ui.unregister(nc)
             task_provider.unregister(nc)
-            _unregister_events_listener(nc)
+            file_events.unregister_webhooks(nc)
+            poll_loop.stop()
             nc.ui.files_dropdown_menu.unregister("recognize_llm_describe")
             nc.ui.top_menu.unregister("dashboard")
             nc.ocs("DELETE", "/ocs/v1.php/apps/app_api/api/v1/ui/script", params={

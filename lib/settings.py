@@ -65,6 +65,23 @@ _KEYS: dict[str, tuple[str, str]] = {
     # name a landmark the photo was taken NEAR). Empty disables landmark search.
     # No settings-UI field — configurable via env/appconfig for self-hosters.
     "overpass_url": ("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
+    # ── New-file detection (see lib/file_events.py) ──────────────────────────────
+    # AppAPI 33/34 ship no file-event API (the old events_listener was dropped in the
+    # rewrite), so we detect uploads two update-proof ways instead: NC core webhooks
+    # (instant) + a periodic self-scan (guaranteed-eventual backstop).
+    "webhook_enabled": ("WEBHOOK_ENABLED", "yes"),
+    # NC-reachable base URL of THIS exApp (no trailing /events/webhook). NC's core
+    # webhook_listeners POSTs upload events here. For a manual_install daemon this is the
+    # LAN address+port NC uses to reach the container, e.g. http://192.168.0.143:23000.
+    # Empty ⇒ webhook registration is skipped (polling still covers detection).
+    "webhook_exapp_url": ("WEBHOOK_EXAPP_URL", ""),
+    # Shared secret sent by NC in a header and verified on receipt. Auto-generated and
+    # persisted on first enable when left empty.
+    "webhook_secret": ("WEBHOOK_SECRET", ""),
+    # Periodic backstop scan: catches anything the webhook missed (webhook app disabled,
+    # exApp unreachable, NC restart). Depends on nothing outside the exApp.
+    "poll_enabled": ("POLL_ENABLED", "yes"),
+    "poll_interval": ("POLL_INTERVAL", "900"),
 }
 
 
@@ -87,6 +104,11 @@ class Settings:
     geotag: bool
     nominatim_url: str
     overpass_url: str
+    webhook_enabled: bool
+    webhook_exapp_url: str
+    webhook_secret: str
+    poll_enabled: bool
+    poll_interval: int
 
     @property
     def chat_url(self) -> str:
@@ -137,4 +159,9 @@ def load(nc: NextcloudApp) -> Settings:
         geotag=str(r["geotag"]).lower() in ("1", "yes", "true", "on"),
         nominatim_url=r["nominatim_url"].strip() or "https://nominatim.openstreetmap.org",
         overpass_url=r["overpass_url"].strip(),
+        webhook_enabled=str(r["webhook_enabled"]).lower() in ("1", "yes", "true", "on"),
+        webhook_exapp_url=r["webhook_exapp_url"].strip().rstrip("/"),
+        webhook_secret=r["webhook_secret"].strip(),
+        poll_enabled=str(r["poll_enabled"]).lower() in ("1", "yes", "true", "on"),
+        poll_interval=max(60, int(r["poll_interval"] or 900)),
     )
