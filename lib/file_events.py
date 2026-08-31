@@ -270,6 +270,10 @@ class PollLoop:
             if mtime <= watermark:
                 continue
             max_mtime = max(max_mtime, mtime)
+            # Shared-in read-only files: the owner's own scan enqueues them; a job under this user
+            # could only caption-then-403. (processor re-checks this — here it just saves a job.)
+            if node.info.permissions and not node.is_updatable:
+                continue
             if (node.info.mimetype or "").lower() in allowed_mimes:
                 job_queue.enqueue(uid, node.info.fileid, source="poll")
                 enqueued += 1

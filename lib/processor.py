@@ -42,6 +42,13 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     if node is None or node.is_dir:
         return Result("skipped", reason="not a file")
 
+    # Shared-in, read-only file: we could caption it but never write the tags/description back
+    # (403 on every attempt), and the owner's own job processes the file anyway. Skip BEFORE
+    # spending GPU time. Guarded on permissions being populated so a node lacking extended info
+    # (they all have it via by_id's SEARCH, but belt-and-braces) behaves exactly as before.
+    if node.info.permissions and not node.is_updatable:
+        return Result("skipped", reason="read-only share (owner's job processes it)")
+
     mimetype = (node.info.mimetype or "").lower()
     is_video = settings.video_mimetype_allowed(mimetype)
 

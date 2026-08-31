@@ -11,6 +11,10 @@ from typing import Annotated
 from nc_py_api.ex_app import persistent_storage as _ps
 os.environ.setdefault("INSIGHTFACE_HOME", _ps())
 
+# Harden all Nextcloud HTTP against keep-alive reuse races (the historic queue-freeze trap —
+# see OPERATIONS.md). Must be imported before anything constructs a NextcloudApp.
+import nc_transport  # noqa: F401  (imported for its side effect)
+
 import file_events
 import job_queue
 import routes_backfill

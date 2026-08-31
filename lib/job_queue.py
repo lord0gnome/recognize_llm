@@ -27,6 +27,18 @@ STUCK_JOB_TIMEOUT = 900
 # restart used to provide. Cooldown prevents thrashing when Nextcloud itself is genuinely down.
 NC_REFRESH_AFTER_FAILURES = 3
 NC_REFRESH_COOLDOWN = 30
+# ── Never-stuck retry policy ────────────────────────────────────────────────────────────────────
+# Infrastructure-flavoured failures (transport races, NC restarts, gateway blips) are requeued
+# WITHOUT burning an attempt: the job rotates to the back of the queue and is retried forever.
+# Each one also pauses the worker with escalating backoff and rebuilds the session, so a failure
+# storm slows the loop OUT of the ~5s keep-alive danger window instead of tightening into it
+# (the historic "queue frozen until restart" trap — see OPERATIONS.md). Statuses NOT listed here
+# (403, 404, 422, ...) are job-level: they burn attempts and can park a job in 'failed'.
+# 996/997/999 are nc_py_api's OCS pseudo-statuses (RESPOND_SERVER_ERROR / RESPOND_UNAUTHORISED /
+# unknown error) — the OCS-envelope twins of 500/401. 998 (= not found) stays job-level.
+TRANSIENT_HTTP_STATUSES = {400, 401, 408, 425, 429, 500, 502, 503, 504, 996, 997, 999}
+TRANSIENT_BACKOFF_BASE = 5.0
+TRANSIENT_BACKOFF_CAP = 300.0
 _DB = os.path.join(persistent_storage(), "recognize_llm_queue.db")
 _claim_lock = threading.Lock()
 
@@ -343,8 +355,12 @@ def get_recent(limit: int = 20, user_id: str | None = None) -> list[dict]:
     ]
 
 
-def _claim() -> sqlite3.Row | None:
-    """Atomically move one pending job to 'processing' and return it."""
+def _claim() -> dict | None:
+    """Atomically move one pending job to 'processing' and return it, along with its claim stamp.
+
+    The stamp lets _finish/_requeue verify the row is still THIS worker's claim: if the attempt
+    outlived STUCK_JOB_TIMEOUT, the reaper requeued the job and another worker may hold it now —
+    the stale worker's write must become a no-op instead of clobbering the fresh claim."""
     with _claim_lock, _connect() as con:
         row = con.execute(
             "SELECT user_id, file_id, source, force, attempts FROM jobs WHERE status='pending' "
@@ -352,30 +368,56 @@ def _claim() -> sqlite3.Row | None:
         ).fetchone()
         if row is None:
             return None
+        now = int(time.time())
         con.execute(
             "UPDATE jobs SET status='processing', updated_at=? WHERE user_id=? AND file_id=?",
-            (int(time.time()), row["user_id"], row["file_id"]),
+            (now, row["user_id"], row["file_id"]),
         )
-        return row
+        return {**dict(row), "claim_ts": now}
 
 
-def _requeue(row: sqlite3.Row) -> None:
+def _is_transient_infra_error(e: Exception) -> bool:
+    """True for failures that indicate infrastructure trouble (dead keep-alive reuse, NC or
+    gateway hiccup, network blip) rather than a problem with the job itself. A definitive HTTP
+    status outside TRANSIENT_HTTP_STATUSES is a job-level answer; only status-less errors fall
+    back to exception-type checks (requests-style HTTPError subclasses OSError, so the status
+    check MUST come first or every 4xx would count as transient)."""
+    status = getattr(e, "status_code", None)  # nc_py_api NextcloudException
+    if not status:
+        resp = getattr(e, "response", None)   # niquests/requests HTTPError (dav.py raise_for_status)
+        status = getattr(resp, "status_code", None)
+    if status:
+        return status in TRANSIENT_HTTP_STATUSES
+    # Deliberately NOT bare OSError: PIL raises OSError subclasses for corrupt images/frames,
+    # and those are the file's fault, not the network's.
+    if isinstance(e, (ConnectionError, TimeoutError)):
+        return True
+    mod = type(e).__module__ or ""
+    return mod.startswith(("niquests", "urllib3", "http.client", "ssl", "socket"))
+
+
+def _requeue(row: dict, error: str = "") -> None:
     """Put a claimed job back to pending WITHOUT burning an attempt (infrastructure outage,
     not a job problem). Bumping updated_at sends it to the back of the queue, so one
-    backend-crashing file rotates behind every other pending job instead of head-blocking."""
+    backend-crashing file rotates behind every other pending job instead of head-blocking.
+    The error text is recorded so endlessly-rotating jobs stay visible on the dashboard.
+    No-op if the row is no longer this worker's claim (see _claim)."""
     with _connect() as con:
         con.execute(
-            "UPDATE jobs SET status='pending', updated_at=? WHERE user_id=? AND file_id=?",
-            (int(time.time()), row["user_id"], row["file_id"]),
+            "UPDATE jobs SET status='pending', error=?, updated_at=? "
+            "WHERE user_id=? AND file_id=? AND status='processing' AND updated_at=?",
+            (error[:1000], int(time.time()), row["user_id"], row["file_id"], row["claim_ts"]),
         )
 
 
-def _finish(row: sqlite3.Row, status_: str, error: str = "") -> None:
+def _finish(row: dict, status_: str, error: str = "") -> None:
+    """Complete the claimed attempt. No-op if the row is no longer this worker's claim (see _claim)."""
     with _connect() as con:
         con.execute(
             "UPDATE jobs SET status=?, attempts=attempts+1, error=?, updated_at=? "
-            "WHERE user_id=? AND file_id=?",
-            (status_, error[:1000], int(time.time()), row["user_id"], row["file_id"]),
+            "WHERE user_id=? AND file_id=? AND status='processing' AND updated_at=?",
+            (status_, error[:1000], int(time.time()), row["user_id"], row["file_id"],
+             row["claim_ts"]),
         )
 
 
@@ -448,6 +490,7 @@ class Workers:
         idle = 0.0
         fails = 0            # consecutive job failures — a run of these means the nc session went bad
         last_refresh = 0.0
+        transient_streak = 0  # consecutive infrastructure failures — drives the escalating backoff
         while not self._stop.is_set():
             # Outer guard: a failure in _claim / _finish / logging must NEVER kill the worker thread,
             # or the (single) worker dies silently and the queue stalls until a container restart.
@@ -467,6 +510,24 @@ class Workers:
                     # (the "queue is stuck until someone clicks Retry" pattern).
                     self._wait_for_vision(nc)
                     continue
+                if result == "transient":
+                    # Infrastructure trouble. The job is already requeued un-burned. Pause with
+                    # escalating backoff so the loop cadence leaves the keep-alive danger window,
+                    # and start over from a completely fresh session. Worst case the queue retries
+                    # every TRANSIENT_BACKOFF_CAP seconds forever — it never freezes.
+                    transient_streak += 1
+                    pause = min(TRANSIENT_BACKOFF_BASE * (2 ** min(transient_streak - 1, 6)),
+                                TRANSIENT_BACKOFF_CAP)
+                    _safe_log(nc, f"recognize_llm: transient infra failure #{transient_streak} — "
+                                  f"backing off {pause:.0f}s, rebuilding session")
+                    try:
+                        nc = NextcloudApp()
+                    except Exception:
+                        pass
+                    if self._stop.wait(pause):
+                        return
+                    continue
+                transient_streak = 0
                 ok = result == "ok"
                 fails = 0 if ok else fails + 1
                 # A streak of failures = poisoned session (every by_id/download 400s or hangs).
@@ -483,7 +544,7 @@ class Workers:
                 _safe_log(nc, f"recognize_llm: worker loop error (recovered): {e}")
                 time.sleep(2.0)
 
-    def _process_one(self, nc, row: sqlite3.Row) -> str:
+    def _process_one(self, nc, row: dict) -> str:
         """Process one job. Returns "ok" (done/skipped), "fail", or "vision_down" (backend outage)."""
         import processor
         from vision_client import VisionUnavailable
@@ -501,10 +562,17 @@ class Workers:
                 )
             return "ok" if res.status in ("done", "skipped") else "fail"
         except VisionUnavailable as e:
-            _requeue(row)
+            _requeue(row, f"vision backend unavailable: {e}")
             self._outage_reason = str(e)
             return "vision_down"
         except Exception as e:
+            if _is_transient_infra_error(e):
+                # Not the job's fault: requeue un-burned (rotates to the back of the queue) and let
+                # the loop apply backoff + a fresh session. The queue never parks on these.
+                _requeue(row, f"transient: {e}")
+                _safe_log(nc, f"recognize_llm: transient infra error on user={row['user_id']} "
+                              f"file={row['file_id']} — will retry: {e}")
+                return "transient"
             retry = row["attempts"] + 1 < MAX_ATTEMPTS
             _finish(row, "pending" if retry else "failed", str(e))
             _safe_log(nc, f"recognize_llm: job user={row['user_id']} file={row['file_id']} error: {e}")
