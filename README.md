@@ -13,6 +13,10 @@ to your local vision endpoint and writes the result back into Nextcloud as:
 Original image files are **never modified**. The app also registers a **TaskProcessing provider**
 (`recognize_llm:image2text`) so other Nextcloud AI features can reuse the same engine.
 
+> **Operating this specific deployment?** Read [OPERATIONS.md](OPERATIONS.md) first — it documents
+> the live topology (the app runs on `apoc`, the LLM endpoint is llama-swap), the deploy procedure,
+> and the root cause + fix for the recurring queue freezes.
+
 ## Architecture
 
 One vision engine ([`lib/processor.py`](lib/processor.py)), three entry points:

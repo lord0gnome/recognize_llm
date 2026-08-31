@@ -1,5 +1,10 @@
 # Deploying recognize_llm to production (Podman + `podman play kube` + GHCR)
 
+> **⚠️ This is a generic runbook, and following it on the Nextcloud host is how a duplicate instance
+> got created in Aug 2026.** The actual production instance runs on **apoc** via a `manual_install`
+> daemon — see [OPERATIONS.md](OPERATIONS.md) for the live topology and the current deploy
+> procedure. Never run a second instance alongside it.
+
 This is the runbook for a **rootless/rootful Podman** host where Nextcloud runs as a pod (via
 `podman play kube`), the **container runtime is on the same host**, and the exApp image is published
 to **GitHub Container Registry (ghcr.io)**.
