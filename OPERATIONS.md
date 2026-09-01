@@ -128,14 +128,16 @@ pairs and near-synonyms). Flow: dashboard admin card "Tag cleanup" (or
 images) to the LLM in ~500-tag chunks → proposed merges appear in the dashboard for **review**
 (click a chip to veto) → **approve** persists `tag_aliases` in the queue DB (future captions are
 canonicalized immediately at the processor choke point; unknown new tags always pass through) →
-**apply** rewrites existing NC tags in the background (rename when the canonical doesn't exist —
-one call preserves assignments; otherwise per-user re-tag + delete, resumable, transient-error
-policy applies). Excluded always: `person:*` tags, the recognize-v3 marker, anything with `:`.
+**apply** is ADDITIVE (user decision 2026-09-01): every file carrying a source tag also gets the
+canonical tag — nothing is renamed or deleted, both names stay searchable (per-user re-tag,
+resumable, transient-error policy applies; the canonical is created if missing). Future captions
+likewise keep the model's tag and gain the canonical (capped model tags first, expansion exempt
+from max_tags). Excluded always: `person:*` tags, the recognize-v3 marker, anything with `:`.
 Re-running analyze folds newly appeared tags into the established canonicals.
 Prompt note: the naive "condense" phrasing makes the model CATEGORIZE (sunset→time) — the shipped
 prompt is dedup-framed with explicit wrong-examples; keep it that way.
-*Gotcha:* files that only ever had a merged-away tag keep working (rename/re-tag covers them), but
-a share upgraded to writable later needs a backfill to get captions at all (see read-only skip).
+*Gotcha:* apply is additive, so no tag ever disappears; but a share upgraded to writable later
+still needs a backfill to get captions at all (see read-only skip).
 
 ## The two-instance incident
 

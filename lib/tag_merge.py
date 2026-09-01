@@ -4,7 +4,7 @@ Pipeline (see tag_consolidation for the pure logic):
   analyze  — LLM-condense the tag vocabulary in chunks -> proposed pairs in the queue DB
   review   — admin vetoes individual pairs (dashboard), then approves or discards the run
   approve  — folds the approved mapping into tag_aliases (future captions canonical immediately)
-  apply    — resumable background rewrite of existing Nextcloud tags (renames + collision merges)
+  apply    — resumable background ADDITIVE tagging (the canonical is added alongside each source)
 """
 
 from __future__ import annotations
@@ -67,8 +67,9 @@ def _resolve_users(nc: NextcloudApp) -> list[str]:
 
 
 def _resolve_users_strict(nc_ref: dict, gen: int) -> list[str]:
-    """User set for APPLY. delete_tag cascades assignments for ALL users server-side, so a
-    partial user list means silent cross-user data loss — refuse to guess."""
+    """User set for APPLY. A pair is marked 'applied' after one pass, so users missing from a
+    partial list would silently never receive the canonical tag (nothing self-heals later) —
+    refuse to guess rather than deliver partial coverage."""
     listed: set[str] = set()
     try:
         listed = set(_nc_retry(nc_ref, gen, lambda nc: nc.users.get_list() or []))
@@ -84,7 +85,7 @@ def _resolve_users_strict(nc_ref: dict, gen: int) -> list[str]:
     if not listed and not known:
         raise RuntimeError(
             "cannot resolve the user list (no provisioning access and empty jobs table) — "
-            "refusing to apply merges that would delete tags for unseen users")
+            "refusing to apply with unknown coverage (missed users would never get canonicals)")
     caller = nc_ref["nc"].user
     return sorted(listed | known | ({caller} if caller else set()))
 
@@ -296,6 +297,12 @@ def _analyze(nc: NextcloudApp, include_uppercase: bool) -> None:
         users = _resolve_users(nc)
         counts_by_id = fetch_tag_counts(nc, users)
         counts = {name: counts_by_id.get(tid, 0) for tid, name in vocab}
+        aliases_now = load_aliases()
+        # Convergence: sources that already have an alias are fully handled (captions expand
+        # them; apply added their canonicals) — keep them out of the LLM's view so re-runs
+        # only surface NEW drift instead of re-proposing every past merge.
+        vocab = [(tid, name) for tid, name in vocab if name not in aliases_now]
+        id_by_name = {name: tid for tid, name in vocab}
         chunks = tc.chunk_vocabulary([(name, counts[name]) for _, name in vocab])
 
         now = int(time.time())
@@ -308,9 +315,9 @@ def _analyze(nc: NextcloudApp, include_uppercase: bool) -> None:
         _state.update(run_id=run_id, chunks_total=len(chunks))
         _log(nc, LogLvl.INFO, f"tag analyze started: {len(vocab)} tags in {len(chunks)} chunks")
 
-        canonical_seen = set(load_aliases().values())
+        canonical_seen = set(aliases_now.values())
         canonicals = sorted(canonical_seen)
-        vocab_names = set(id_by_name)
+        vocab_names = {name for _, name in vocab}
         all_pairs: list[tuple[str, str, str]] = []
         for i, chunk in enumerate(chunks):
             if not _active(gen):
@@ -380,54 +387,61 @@ def _nc_retry(nc_ref: dict, gen: int, fn):
 
 
 def _apply_pair(nc_ref: dict, pair: dict, users: list[str], admin_uid: str, gen: int) -> str:
-    """Apply one approved merge; returns final status ('applied')."""
+    """Apply one approved merge ADDITIVELY: every file carrying the source tag also gets the
+    canonical tag. Nothing is renamed or deleted — both names stay searchable. Returns 'applied'.
+    """
     source, canonical = pair["source"], pair["canonical"]
     if tc._excluded_name(source) or tc._excluded_name(canonical):
         raise ValueError("refusing excluded tag name")
 
     def _as_admin(fn):
-        # Tag admin ops (list/rename/delete) must run in the initiating admin's context — the
-        # per-user collision loop below changes the session user, and a _nc_retry rebuild
-        # resets it to none at all.
+        # Tag admin ops (list/create) run in the initiating admin's context — the per-user loop
+        # below changes the session user, and a _nc_retry rebuild resets it entirely.
         def run(nc):
             if admin_uid:
                 nc.set_user(admin_uid)
             return fn(nc)
         return run
 
+    def _find(tags_, exclude_id=None):
+        # Prefer the exact name; fall back to a case-insensitive twin (NC can refuse creating
+        # 'bicycle' next to 'Bicycle' with a 409 on case-insensitive DB collations, matching
+        # storage._ensure_tag's semantics). Never resolve to the excluded (source) tag.
+        exact = next((t for t in tags_ if t.display_name == canonical), None)
+        if exact is not None and exact.tag_id != exclude_id:
+            return exact
+        return next((t for t in tags_ if t.display_name.casefold() == canonical.casefold()
+                     and t.tag_id != exclude_id), None)
+
     tags = _nc_retry(nc_ref, gen, _as_admin(lambda nc: nc.files.list_tags()))
-    by_exact = {t.display_name: t for t in tags}
-    src = by_exact.get(source)
+    src = next((t for t in tags if t.display_name == source), None)
     if src is None:
-        return "applied"  # already gone/merged; alias still guards the future
-    dst = by_exact.get(canonical)
+        return "applied"  # source tag gone; nothing carries it — alias still covers the future
+    dst = _find(tags, exclude_id=src.tag_id)
+    if dst is None and canonical.casefold() == source.casefold():
+        return "applied"  # pure case pair with no twin: additive semantics have nothing to add
     if dst is None:
-        # Case-insensitive fallback MUST exclude the source itself: for a case-only merge
-        # (Bicycle -> bicycle) matching src here would send us down the collision path, whose
-        # final delete_tag would destroy the only copy of the tag. Rename handles that case.
-        dst = next((t for t in tags if t.display_name.casefold() == canonical.casefold()
-                    and t.tag_id != src.tag_id), None)
+        # Canonical doesn't exist yet (e.g. a created singular like "leaf") — make it.
+        def _create(nc):
+            try:
+                nc.files.create_tag(canonical, user_visible=True, user_assignable=True)
+            except NextcloudException as e:
+                if e.status_code != 409:  # 409 = exists (possibly as a case twin)
+                    raise
+        _nc_retry(nc_ref, gen, _as_admin(_create))
+        tags = _nc_retry(nc_ref, gen, _as_admin(lambda nc: nc.files.list_tags()))
+        dst = _find(tags, exclude_id=src.tag_id)
+        if dst is None:
+            raise RuntimeError(f"created tag {canonical!r} but cannot find it")
+    if dst.tag_id == src.tag_id:
+        return "applied"  # degenerate self-pair; nothing to add
 
-    if dst is None:
-        # Pure rename (including case-only changes): preserves every assignment in one call.
-        try:
-            _nc_retry(nc_ref, gen,
-                      _as_admin(lambda nc: nc.files.update_tag(src.tag_id, name=canonical)))
-            return "applied"
-        except NextcloudException as e:
-            if e.status_code != 409:
-                raise
-            tags = _nc_retry(nc_ref, gen, _as_admin(lambda nc: nc.files.list_tags()))
-            dst = next((t for t in tags if t.display_name == canonical
-                        and t.tag_id != src.tag_id), None)
-            if dst is None:
-                raise
-
-    # Collision merge: re-tag every reachable file, then drop the source tag (cascades mappings).
+    # Add the canonical to every reachable file that carries the source tag. Idempotent:
+    # 409 (already tagged) is tolerated, so re-runs after a stop/crash are free.
     for uid in users:
         if not _active(gen):
             raise _Stopped()
-        _state["current"] = f"{source} -> {canonical} ({uid})"
+        _state["current"] = f"{source} += {canonical} ({uid})"
 
         def _files(nc, uid=uid):
             nc.set_user(uid)
@@ -447,7 +461,6 @@ def _apply_pair(nc_ref: dict, pair: dict, users: list[str], admin_uid: str, gen:
 
             _nc_retry(nc_ref, gen, _assign)
             _state["files_retagged"] += 1
-    _nc_retry(nc_ref, gen, _as_admin(lambda nc: nc.files.delete_tag(src.tag_id)))
     return "applied"
 
 
@@ -474,7 +487,7 @@ def _apply(nc: NextcloudApp) -> None:
             # permanently parked by a transient hiccup — genuinely bad pairs fail again fast).
             pairs = [dict(r) for r in con.execute(
                 "SELECT * FROM tag_merge_pairs WHERE run_id=? AND status IN ('approved','failed') "
-                "ORDER BY (canonical_tag_id != -1), source_count DESC", (run_id,))]
+                "ORDER BY source_count DESC", (run_id,))]  # cosmetic: biggest impact first
         users = _resolve_users_strict(nc_ref, gen)
         _state["pairs_total"] = len(pairs)
         _log(nc, LogLvl.INFO,

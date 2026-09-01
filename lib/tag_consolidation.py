@@ -64,9 +64,9 @@ def build_chunk_prompt(chunk: list[tuple[str, int]], canonicals_so_far: list[str
     return f"""You are DEDUPLICATING the tag vocabulary of a personal photo library. Your job is to find
 near-duplicate tags — NOT to categorize tags into broader groups.
 
-A merge "from -> to" means: the tag "from" is deleted and its photos get "to" instead. A merge is
-ONLY correct when a person searching for either word would be happy to get the exact same photos.
-Both words must mean essentially THE SAME THING.
+A merge "from -> to" means: photos tagged "from" additionally get the tag "to" (both remain
+searchable). A merge is ONLY correct when a person searching for either word would be happy to get
+the exact same photos. Both words must mean essentially THE SAME THING.
 
 STRICT RULES:
 - Merge: singular/plural pairs (trees -> tree), spelling or wording variants (gray/grey,
@@ -213,13 +213,15 @@ def compose_aliases(existing: dict[str, str], new: dict[str, str]) -> dict[str, 
 
 
 def apply_aliases(tags: list[str], aliases: dict[str, str]) -> list[str]:
-    """Canonicalize freshly captioned tags. Unknown tags pass through untouched (the vocabulary
-    may grow — a later consolidation run folds them); person:/excluded names are never mapped."""
+    """ADDITIVE canonicalization of freshly captioned tags: the original tag is kept and its
+    canonical is inserted right after it (best of both worlds — either name finds the photo).
+    Unknown tags pass through untouched (the vocabulary may grow — a later consolidation run
+    folds them); person:/excluded names are never expanded."""
     out: list[str] = []
     seen: set[str] = set()
     for tag in tags:
-        mapped = tag if _excluded_name(tag) else aliases.get(tag, tag)
-        if mapped not in seen:
-            seen.add(mapped)
-            out.append(mapped)
+        for name in (tag,) if _excluded_name(tag) else (tag, aliases.get(tag, tag)):
+            if name not in seen:
+                seen.add(name)
+                out.append(name)
     return out

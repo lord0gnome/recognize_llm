@@ -87,8 +87,8 @@ def _form() -> SettingsForm:
                 type=SettingsFieldType.NUMBER,
                 default=8,
                 description=(
-                    "Only the first N tags from the model's response are written to Nextcloud as system tags. "
-                    "The full list is still stored in the description DAV property."
+                    "Caps how many tags are taken from the model per image; approved "
+                    "tag-consolidation canonicals and GPS place tags are added on top of this cap."
                 ),
             ),
             # ── File selection ───────────────────────────────────────────────

@@ -38,7 +38,9 @@ def _ensure_tag(nc: NextcloudApp, name: str):
 def write_results(nc: NextcloudApp, node: FsNode, caption: Caption, settings: Settings) -> None:
     # user-visible/user-assignable tags can be created and assigned by any NC user,
     # so we keep the file-owner context throughout (no need to drop to empty user).
-    for name in caption.tags[: settings.max_tags]:
+    # No slicing here: processor caps the model's tags at max_tags BEFORE alias expansion, so
+    # canonical additions (which arrive past the cap) must not be trimmed away.
+    for name in caption.tags:
         tag = _ensure_tag(nc, name)
         try:
             nc.files.assign_tag(node, tag)

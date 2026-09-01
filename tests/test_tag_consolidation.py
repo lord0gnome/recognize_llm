@@ -100,11 +100,14 @@ def test_compose_aliases_skips_cycle():
     assert not (set(out) & set(out.values()))
 
 
-def test_apply_aliases_dedup_and_passthrough():
+def test_apply_aliases_additive_dedup_and_passthrough():
     aliases = {"trees": "tree", "woods": "forest"}
     tags = ["trees", "tree", "woods", "sunset", "person:Bob", "trees"]
-    assert tc.apply_aliases(tags, aliases) == ["tree", "forest", "sunset", "person:Bob"]
+    # Additive: the source stays and the canonical is inserted right after it.
+    assert tc.apply_aliases(tags, aliases) == [
+        "trees", "tree", "woods", "forest", "sunset", "person:Bob"]
     assert tc.apply_aliases([], aliases) == []
+    assert tc.apply_aliases(["sunset"], aliases) == ["sunset"]
 
 
 def test_safe_variant_fold():

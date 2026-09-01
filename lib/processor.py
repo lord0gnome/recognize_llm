@@ -81,11 +81,15 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
         image_bytes, mimetype, is_video=is_video,
         location=location.context() if location else "",
     )
+    # Cap the MODEL's tags before anything else is added (vision_client already enforces this;
+    # the slice is a belt in case that ever changes). Geo tags and alias canonicals are
+    # deliberately exempt from max_tags — they are deterministic additions, not model spam.
+    caption.tags = caption.tags[: settings.max_tags]
     for tag in location.tags() if location else []:
         if tag not in caption.tags:
             caption.tags.append(tag)
-    # Canonicalize through the approved consolidation aliases (tag_merge). Unknown tags pass
-    # through untouched — the vocabulary may grow; a later consolidation run folds them.
+    # Additive canonicalization through the approved consolidation aliases: every tag keeps its
+    # original name and gains its canonical right after it (storage does not re-slice).
     caption.tags = tag_consolidation.apply_aliases(caption.tags, tag_merge.get_alias_map())
     storage.write_results(nc, node, caption, settings)
     storage.set_marker(nc, node)
