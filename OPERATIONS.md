@@ -133,7 +133,14 @@ canonical tag — nothing is renamed or deleted, both names stay searchable (per
 resumable, transient-error policy applies; the canonical is created if missing). Future captions
 likewise keep the model's tag and gain the canonical (capped model tags first, expansion exempt
 from max_tags). Excluded always: `person:*` tags, the recognize-v3 marker, anything with `:`.
-Re-running analyze folds newly appeared tags into the established canonicals.
+Re-running analyze folds newly appeared tags into the established canonicals (already-aliased
+sources are excluded, so re-runs only surface new drift).
+*Bulk-apply lesson (2026-09-01):* the app's apply lists files per tag via a DAV REPORT, which
+times out on tags with tens of thousands of files (`outdoors` = 34k) — fine for incremental
+follow-ups, wrong for a first 160k-assignment backfill. That backfill was executed as one
+set-based `INSERT IGNORE` on `oc_systemtag_object_mapping` (script pattern in
+`~/bulk_merge.sql` on the NC host; full DB backup taken first), then the pairs were marked
+applied in the app DB.
 Prompt note: the naive "condense" phrasing makes the model CATEGORIZE (sunset→time) — the shipped
 prompt is dedup-framed with explicit wrong-examples; keep it that way.
 *Gotcha:* apply is additive, so no tag ever disappears; but a share upgraded to writable later
