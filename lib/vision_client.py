@@ -84,6 +84,45 @@ def _normalize_tags(raw, max_tags: int) -> list[str]:
     return tags
 
 
+def chat_json(settings: Settings, prompt: str, *, max_tokens: int = 3000) -> dict:
+    """Text-only chat completion returning parsed JSON (no image) — same endpoint, model and
+    error taxonomy as captioning. Used by tag consolidation."""
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    if settings.llama_model:
+        payload["model"] = settings.llama_model
+    headers = {"Content-Type": "application/json"}
+    if settings.api_key:
+        headers["Authorization"] = f"Bearer {settings.api_key}"
+
+    transport = httpx.HTTPTransport(socket_options=_SOCKET_OPTIONS)
+    # Non-streaming generation of a few thousand tokens yields zero bytes until it completes;
+    # a long vocabulary chunk can legitimately exceed the caption timeout.
+    timeout = max(settings.request_timeout, 600)
+    try:
+        with httpx.Client(transport=transport, timeout=timeout) as client:
+            resp = client.post(settings.chat_url, json=payload, headers=headers)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (502, 503, 504):
+            raise VisionUnavailable(f"LLM backend {settings.chat_url} down: HTTP {e.response.status_code}") from e
+        raise VisionError(f"Chat request to {settings.chat_url} failed: {e}") from e
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        raise VisionUnavailable(f"LLM backend {settings.chat_url} unreachable: {e}") from e
+    except httpx.HTTPError as e:
+        raise VisionError(f"Chat request to {settings.chat_url} failed: {e}") from e
+
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, ValueError) as e:
+        raise VisionError(f"Malformed chat completion response: {e}") from e
+    return _extract_json(content)
+
+
 class VisionClient:
     def __init__(self, settings: Settings):
         self._s = settings

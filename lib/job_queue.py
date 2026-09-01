@@ -198,11 +198,63 @@ def init_db() -> None:
             )
             """
         )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_merge_runs (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at        INTEGER NOT NULL,
+                finished_at       INTEGER NOT NULL DEFAULT 0,
+                phase             TEXT NOT NULL DEFAULT 'analyzing',
+                include_uppercase INTEGER NOT NULL DEFAULT 0,
+                tags_total        INTEGER NOT NULL DEFAULT 0,
+                chunks_total      INTEGER NOT NULL DEFAULT 0,
+                chunks_done       INTEGER NOT NULL DEFAULT 0,
+                error             TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_merge_pairs (
+                run_id           INTEGER NOT NULL,
+                source           TEXT NOT NULL,
+                canonical        TEXT NOT NULL,
+                source_tag_id    INTEGER NOT NULL DEFAULT -1,
+                canonical_tag_id INTEGER NOT NULL DEFAULT -1,
+                source_count     INTEGER NOT NULL DEFAULT 0,
+                canonical_count  INTEGER NOT NULL DEFAULT 0,
+                reason           TEXT NOT NULL DEFAULT '',
+                status           TEXT NOT NULL DEFAULT 'proposed',
+                error            TEXT NOT NULL DEFAULT '',
+                updated_at       INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (run_id, source)
+            )
+            """
+        )
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tag_merge_pairs_status ON tag_merge_pairs(run_id, status)"
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tag_aliases (
+                source     TEXT PRIMARY KEY,
+                canonical  TEXT NOT NULL,
+                run_id     INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
         # Any job left in 'processing' on startup is orphaned (container died mid-job).
         # Reset them so workers pick them up again.
         con.execute(
             "UPDATE jobs SET status='pending', updated_at=? WHERE status='processing'",
             (int(time.time()),),
+        )
+        # An analyze interrupted by a restart is cheap to re-run; mark it failed so the UI
+        # offers a fresh start. Runs mid-'applying' stay as-is (apply is resumable by re-trigger).
+        con.execute(
+            "UPDATE tag_merge_runs SET phase='failed', error='interrupted by restart' "
+            "WHERE phase='analyzing'"
         )
 
 

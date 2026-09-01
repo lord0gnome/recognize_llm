@@ -21,6 +21,7 @@ import routes_backfill
 import routes_dashboard
 import routes_events
 import routes_people
+import routes_tag_merge
 import settings as settings_mod
 import settings_ui
 import task_provider
@@ -75,6 +76,7 @@ APP.include_router(routes_events.router)
 APP.include_router(routes_backfill.router)
 APP.include_router(routes_dashboard.router)
 APP.include_router(routes_people.router)
+APP.include_router(routes_tag_merge.router)
 
 
 @APP.post("/describe_now")
@@ -131,6 +133,15 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
                 ],
                 description="Cluster detected faces and assign person tags to photos.",
             )
+            nc.occ_commands.register(
+                "recognize_llm:consolidate-tags",
+                "/occ/consolidate-tags",
+                options=[
+                    {"name": "action", "shortcut": "a", "mode": "optional", "description": "analyze (default), apply, or status", "default": "analyze"},
+                    {"name": "include-uppercase", "shortcut": "U", "mode": "optional", "description": "Also fold old-recognize Capitalized tags (default: yes)", "default": "yes"},
+                ],
+                description="Condense near-duplicate AI tags (analyze -> review in dashboard -> apply).",
+            )
             workers.start(cfg.concurrency)
             provider_loop.start()
             nc.log(LogLvl.INFO, "recognize_llm enabled")
@@ -150,6 +161,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             })
             nc.occ_commands.unregister("recognize_llm:backfill")
             nc.occ_commands.unregister("recognize_llm:cluster-faces")
+            nc.occ_commands.unregister("recognize_llm:consolidate-tags")
             nc.log(LogLvl.INFO, "recognize_llm disabled")
     except Exception as e:
         return str(e)

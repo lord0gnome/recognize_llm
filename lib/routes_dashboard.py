@@ -275,6 +275,16 @@ var CSS = `
   background:rgba(255,107,107,0.12); color:#ff6b6b; border-color:rgba(255,107,107,0.3);
 }
 #rlm-dash .scanline { font-size:0.72rem; color:#888; margin:-16px 0 20px; }
+#rlm-dash .tmcard { border:1px solid rgba(128,128,128,0.25); border-radius:10px; padding:14px 16px; margin:0 0 22px; }
+#rlm-dash .tmcard h2 { font-size:0.85rem; margin:0 0 8px; opacity:0.85; }
+#rlm-dash .tmline { font-size:0.72rem; color:#888; margin:6px 0 10px; }
+#rlm-dash .tmgroups { max-height:420px; overflow-y:auto; margin:8px 0; }
+#rlm-dash .tmgroup { margin:0 0 8px; font-size:0.78rem; }
+#rlm-dash .tmcanon { font-weight:600; }
+#rlm-dash .tmchip { display:inline-block; margin:2px 4px 2px 0; padding:1px 8px; border-radius:10px;
+  background:rgba(77,171,247,0.16); cursor:pointer; font-size:0.72rem; }
+#rlm-dash .tmchip.off { background:rgba(255,107,107,0.16); text-decoration:line-through; opacity:0.7; }
+#rlm-dash .tmbtns { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
 #rlm-dash .empty {
   grid-column:1/-1; text-align:center; padding:48px; color:#444; font-size:0.9rem;
 }
@@ -291,6 +301,18 @@ var HTML = `
   <button id="rlm-scan" class="sbtn" style="display:none">Scan library</button>
 </div>
 <div class="scanline" id="rlm-scanline" style="display:none"></div>
+<div class="tmcard" id="rlm-tmcard" style="display:none">
+  <h2>Tag cleanup</h2>
+  <div class="tmline" id="rlm-tmline">—</div>
+  <div class="tmgroups" id="rlm-tmgroups" style="display:none"></div>
+  <div class="tmbtns">
+    <button id="rlm-tm-analyze" class="sbtn">Consolidate tags</button>
+    <button id="rlm-tm-approve" class="sbtn" style="display:none">Approve</button>
+    <button id="rlm-tm-apply" class="sbtn" style="display:none">Apply now</button>
+    <button id="rlm-tm-discard" class="rbtn" style="display:none">Discard</button>
+    <button id="rlm-tm-stop" class="rbtn" style="display:none">Stop</button>
+  </div>
+</div>
 <div class="stats">
   <div class="stat pending">  <div class="snum" id="rlm-pending">—</div>  <div class="slbl">Pending</div></div>
   <div class="stat processing"><div class="snum" id="rlm-processing">—</div><div class="slbl">Processing</div></div>
@@ -335,6 +357,11 @@ function mount() {
   if (retryBtn) retryBtn.addEventListener('click', retryFailed);
   var scanBtn = document.getElementById('rlm-scan');
   if (scanBtn) scanBtn.addEventListener('click', scanToggle);
+  [['rlm-tm-analyze', '/analyze'], ['rlm-tm-approve', '/approve'], ['rlm-tm-apply', '/apply'],
+   ['rlm-tm-discard', '/discard'], ['rlm-tm-stop', '/stop']].forEach(function(pair) {
+    var el = document.getElementById(pair[0]);
+    if (el) el.addEventListener('click', function() { tmAction(pair[1]); });
+  });
 
   // Probe the admin-only /all endpoints first; a 403 means regular user.
   fetch(API + '/all/status', {credentials:'same-origin'})
@@ -347,6 +374,7 @@ function mount() {
       }
       startPolling();
       bfPoll();  // shows the scan button only if the admin-only backfill API answers
+      tmPoll();  // same trick for the tag-cleanup card
     });
 }
 
@@ -451,6 +479,137 @@ function scanToggle() {
     .then(function(r) { return r.json(); })
     .then(function() { btn.disabled = false; bfPoll(); if (_poll) _poll(); })
     .catch(function() { btn.disabled = false; });
+}
+
+/* ── Tag consolidation (admin-only; 403 hides the card) ─────────────────────── */
+var TM = PROXY + '/tags/merge';
+var _tmTimer = null;
+var _tmShowAll = false;
+
+function tmSet(id, show, text) {
+  var el = document.getElementById(id);
+  if (!el) return el;
+  el.style.display = show ? '' : 'none';
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function tmRenderProposal(editable) {
+  fetch(TM + '/proposal', {credentials:'same-origin'})
+    .then(function(r) { if (!r.ok) throw 0; return r.json(); })
+    .then(function(p) {
+      var box = document.getElementById('rlm-tmgroups');
+      if (!box) return;
+      box.innerHTML = '';
+      var groups = p.groups || [];
+      var shown = _tmShowAll ? groups : groups.slice(0, 200);
+      shown.forEach(function(g) {
+        var div = document.createElement('div');
+        div.className = 'tmgroup';
+        var head = document.createElement('span');
+        head.className = 'tmcanon';
+        head.textContent = g.canonical + ' — ' + fmt(g.canonical_count || 0) + '  ← ';
+        div.appendChild(head);
+        (g.sources || []).forEach(function(s) {
+          var chip = document.createElement('span');
+          chip.className = 'tmchip' + (s.status === 'rejected' ? ' off' : '');
+          chip.textContent = s.source + ' ×' + fmt(s.source_count || 0);
+          if (!editable) {
+            chip.style.cursor = 'default';
+            chip.title = s.reason || '';
+            div.appendChild(chip);
+            return;
+          }
+          chip.title = (s.reason || '') + ' — click to toggle this merge';
+          chip.addEventListener('click', function() {
+            var rejecting = !chip.classList.contains('off');
+            fetch(TM + '/reject', {method:'POST', credentials:'same-origin',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({source: s.source, rejected: rejecting})})
+              .then(function(r) { return r.json(); })
+              .then(function(j) {
+                if (j.status === 'ok') chip.classList.toggle('off', rejecting);
+              })
+              .catch(function() {});
+          });
+          div.appendChild(chip);
+        });
+        box.appendChild(div);
+      });
+      if (!_tmShowAll && groups.length > 200) {
+        var more = document.createElement('a');
+        more.href = '#';
+        more.textContent = 'show all ' + groups.length + ' groups…';
+        more.addEventListener('click', function(e) { e.preventDefault(); _tmShowAll = true; tmRenderProposal(editable); });
+        box.appendChild(more);
+      }
+      box.style.display = 'block';
+    })
+    .catch(function() {});
+}
+
+function tmUpdate(st) {
+  tmSet('rlm-tmcard', true);
+  var phase = st.phase || 'none';
+  var counts = st.pair_counts || {};
+  var proposed = counts.proposed || 0, approved = counts.approved || 0;
+  var applied = counts.applied || 0, failed = counts.failed || 0;
+  var line = document.getElementById('rlm-tmline');
+  var running = st.running;
+
+  tmSet('rlm-tm-analyze', !running && (phase === 'none' || phase === 'applied' || phase === 'discarded' || phase === 'failed' || phase === 'proposed'));
+  tmSet('rlm-tm-approve', !running && phase === 'proposed' && proposed > 0,
+        'Approve ' + fmt(proposed) + ' merges');
+  tmSet('rlm-tm-apply', !running && (phase === 'approved' || phase === 'applying'));
+  tmSet('rlm-tm-discard', !running && (phase === 'proposed' || phase === 'approved' || phase === 'failed'));
+  tmSet('rlm-tm-stop', running);
+  var showGroups = phase === 'proposed' || phase === 'approved';
+  if (!showGroups) tmSet('rlm-tmgroups', false);
+
+  if (running && st.mode === 'analyze') {
+    line.textContent = 'Analyzing vocabulary — ' + st.current;
+  } else if (running && st.mode === 'apply') {
+    line.textContent = 'Applying — pairs ' + fmt(st.pairs_done) + '/' + fmt(st.pairs_total) +
+      ' · ' + fmt(st.files_retagged) + ' files re-tagged · ' + (st.current || '');
+  } else if (phase === 'proposed') {
+    line.textContent = fmt(proposed) + ' merges proposed (click a chip to veto), ' +
+      fmt(st.alias_count || 0) + ' aliases active.';
+    tmRenderProposal(true);
+  } else if (phase === 'approved' || phase === 'applying') {
+    line.textContent = fmt(approved) + ' approved, ' + fmt(applied) + ' applied' +
+      (failed ? ', ' + fmt(failed) + ' failed' : '') + '. Aliases already shape new captions.';
+    tmRenderProposal(false);
+  } else if (phase === 'applied') {
+    line.textContent = 'Last run applied ' + fmt(applied) + ' merges' +
+      (failed ? ' (' + fmt(failed) + ' failed)' : '') + '. ' +
+      fmt(st.alias_count || 0) + ' aliases active.';
+  } else if (phase === 'failed') {
+    line.textContent = 'Analyze failed: ' + (st.error || 'see logs');
+  } else {
+    line.textContent = fmt(st.alias_count || 0) + ' aliases active. Analyze the vocabulary to find duplicate tags.';
+  }
+}
+
+function tmPoll() {
+  fetch(TM + '/status', {credentials:'same-origin'})
+    .then(function(r) { if (!r.ok) throw 0; return r.json(); })
+    .then(function(st) {
+      tmUpdate(st);
+      if (st.running && !_tmTimer) _tmTimer = setInterval(tmPoll, 3000);
+      if (!st.running && _tmTimer) { clearInterval(_tmTimer); _tmTimer = null; }
+    })
+    .catch(function() {});  // non-admin: card stays hidden
+}
+
+function tmAction(path) {
+  fetch(TM + path, {method:'POST', credentials:'same-origin',
+    headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(function() {
+      _tmShowAll = false;
+      tmPoll();
+      setTimeout(tmPoll, 2000);  // BackgroundTasks start after the response; re-check
+    })
+    .catch(function() {});
 }
 
 /* ── Stats update ────────────────────────────────────────────────────────── */

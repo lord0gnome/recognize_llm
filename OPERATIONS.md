@@ -120,6 +120,23 @@ dashboard queue freezes, and *"a restart of the container always fixes it"*. Dia
    everyone instead of being captioned without a marker — after making such a share writable, run a
    backfill to pick its files up.
 
+## Tag consolidation
+
+Since 2026-09-01 the app can condense its own tag vocabulary (14.6k tags had drifted into plural
+pairs and near-synonyms). Flow: dashboard admin card "Tag cleanup" (or
+`occ recognize_llm:consolidate-tags`) → **analyze** feeds the vocabulary (names + usage counts, no
+images) to the LLM in ~500-tag chunks → proposed merges appear in the dashboard for **review**
+(click a chip to veto) → **approve** persists `tag_aliases` in the queue DB (future captions are
+canonicalized immediately at the processor choke point; unknown new tags always pass through) →
+**apply** rewrites existing NC tags in the background (rename when the canonical doesn't exist —
+one call preserves assignments; otherwise per-user re-tag + delete, resumable, transient-error
+policy applies). Excluded always: `person:*` tags, the recognize-v3 marker, anything with `:`.
+Re-running analyze folds newly appeared tags into the established canonicals.
+Prompt note: the naive "condense" phrasing makes the model CATEGORIZE (sunset→time) — the shipped
+prompt is dedup-framed with explicit wrong-examples; keep it that way.
+*Gotcha:* files that only ever had a merged-away tag keep working (rename/re-tag covers them), but
+a share upgraded to writable later needs a backfill to get captions at all (see read-only skip).
+
 ## The two-instance incident
 
 The local kube stack was built in July as a migration that never re-pointed the AppAPI daemon, and

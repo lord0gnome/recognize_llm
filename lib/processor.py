@@ -10,6 +10,8 @@ from dataclasses import dataclass
 import face_pipeline
 import geo
 import storage
+import tag_consolidation
+import tag_merge
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl
 from settings import Settings
@@ -77,6 +79,9 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     for tag in location.tags() if location else []:
         if tag not in caption.tags:
             caption.tags.append(tag)
+    # Canonicalize through the approved consolidation aliases (tag_merge). Unknown tags pass
+    # through untouched — the vocabulary may grow; a later consolidation run folds them.
+    caption.tags = tag_consolidation.apply_aliases(caption.tags, tag_merge.get_alias_map())
     storage.write_results(nc, node, caption, settings)
     storage.set_marker(nc, node)
     nc.log(LogLvl.INFO, f"recognize_llm: tagged {node.user_path} with {caption.tags}")
