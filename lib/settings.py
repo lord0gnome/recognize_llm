@@ -47,6 +47,9 @@ _KEYS: dict[str, tuple[str, str]] = {
     "mimetypes": ("MIMETYPES", "image/jpeg,image/png,image/webp,image/heic,image/heif,image/gif,image/tiff"),
     "video_mimetypes": ("VIDEO_MIMETYPES", "video/mp4,video/mpeg,video/quicktime,video/x-msvideo,video/x-matroska,video/webm,video/ogg"),
     "concurrency": ("CONCURRENCY", "1"),
+    # Files larger than this (MB) are skipped: the whole file is buffered in RAM for
+    # processing, and a multi-GB video can OOM the container (13 GB .mov incident, 2026-09-01).
+    "max_file_mb": ("MAX_FILE_MB", "2048"),
     "request_timeout": ("REQUEST_TIMEOUT", "180"),
     "write_comment": ("WRITE_COMMENT", "yes"),
     "max_tokens": ("MAX_TOKENS", "1024"),
@@ -95,6 +98,7 @@ class Settings:
     mimetypes: list[str]
     video_mimetypes: list[str]
     concurrency: int
+    max_file_mb: int
     request_timeout: int
     write_comment: bool
     max_tokens: int
@@ -150,6 +154,7 @@ def load(nc: NextcloudApp) -> Settings:
         mimetypes=[m.strip().lower() for m in r["mimetypes"].split(",") if m.strip()],
         video_mimetypes=[m.strip().lower() for m in r["video_mimetypes"].split(",") if m.strip()],
         concurrency=max(1, int(r["concurrency"] or 1)),
+        max_file_mb=max(1, int(r["max_file_mb"] or 2048)),
         request_timeout=max(10, int(r["request_timeout"] or 180)),
         write_comment=str(r["write_comment"]).lower() in ("1", "yes", "true", "on"),
         max_tokens=max(64, int(r["max_tokens"] or 1024)),

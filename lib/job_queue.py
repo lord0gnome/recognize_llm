@@ -245,10 +245,17 @@ def init_db() -> None:
             """
         )
         # Any job left in 'processing' on startup is orphaned (container died mid-job).
-        # Reset them so workers pick them up again.
+        # Burn an attempt: if the job itself killed the process (e.g. an OOM poison pill —
+        # a media file whose decode exceeds the memory limit), an un-burned requeue would
+        # crash-loop the container forever. Three crashes park it in 'failed' like any other
+        # job-level problem, and the queue moves on.
         con.execute(
-            "UPDATE jobs SET status='pending', updated_at=? WHERE status='processing'",
-            (int(time.time()),),
+            "UPDATE jobs SET "
+            "status=CASE WHEN attempts + 1 < ? THEN 'pending' ELSE 'failed' END, "
+            "attempts=attempts + 1, "
+            "error='interrupted: container died while processing (possible OOM)', "
+            "updated_at=? WHERE status='processing'",
+            (MAX_ATTEMPTS, int(time.time())),
         )
         # An analyze interrupted by a restart is cheap to re-run; mark it failed so the UI
         # offers a fresh start. Runs mid-'applying' stay as-is (apply is resumable by re-trigger).

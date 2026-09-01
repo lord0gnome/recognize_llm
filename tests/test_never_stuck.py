@@ -68,6 +68,24 @@ def test_ordinary_errors_are_not_transient():
     assert not job_queue._is_transient_infra_error(FakePilError("corrupt frame"))
 
 
+def test_crash_orphan_burns_attempts_and_parks():
+    """A job that kills the container (OOM poison pill) must not crash-loop forever:
+    each startup reset burns an attempt, and MAX_ATTEMPTS crashes park it as failed."""
+    job_queue.init_db()
+    job_queue.enqueue("crash-test", 555555, source="manual")
+    for expected_attempts in (1, 2, 3):
+        row = job_queue._claim()
+        while row is not None and row["file_id"] != 555555:
+            row = job_queue._claim()  # skip unrelated rows other tests may have left pending
+        assert row is not None and row["file_id"] == 555555
+        job_queue.init_db()  # simulate container crash + restart while processing
+        with job_queue._connect() as con:
+            r = con.execute(
+                "SELECT status, attempts FROM jobs WHERE file_id=555555").fetchone()
+        assert r["attempts"] == expected_attempts
+        assert r["status"] == ("failed" if expected_attempts >= 3 else "pending")
+
+
 def test_stale_worker_writes_are_noops():
     """A worker whose attempt outlived the reaper must not clobber a re-claimed row."""
     job_queue.init_db()

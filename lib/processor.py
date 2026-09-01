@@ -56,6 +56,11 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
 
     if not (settings.mimetype_allowed(mimetype) or is_video):
         return Result("skipped", reason=f"mimetype {mimetype}")
+    size = node.info.size or 0
+    if size > settings.max_file_mb * 1048576:
+        # The whole file is buffered in RAM for processing — a multi-GB video would OOM the
+        # container (and crash-loop it before the attempts-on-crash guard parks the job).
+        return Result("skipped", reason=f"too large ({size // 1048576} MB > {settings.max_file_mb} MB limit)")
     if not force and storage.get_marker(nc, node) == node.etag:
         return Result("skipped", reason="unchanged (already processed)")
 
