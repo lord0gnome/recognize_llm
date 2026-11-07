@@ -200,14 +200,15 @@ def unregister_webhooks(nc) -> None:
 def _resolve_all_users(nc) -> list[str]:
     """Users to scan: everyone we've already seen (from our own DB, always available) unioned with
     the provisioning list when the scope allows it. Never needs a user session to return something."""
-    users = set(job_queue.known_user_ids())
     try:
         provisioned = nc.users.get_list()
         if provisioned:
-            users.update(provisioned)
+            # Authoritative list: drops users deleted from Nextcloud that linger in our DB
+            # (otherwise every scan logs "Requested user does not exists" for each of them).
+            return sorted(set(provisioned))
     except Exception:
         pass  # provisioning scope unavailable — DB-known users are enough for a backstop
-    return sorted(users)
+    return sorted(set(job_queue.known_user_ids()))
 
 
 class PollLoop:
