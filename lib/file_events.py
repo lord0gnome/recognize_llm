@@ -22,6 +22,7 @@ etag marker make duplicate deliveries between the two paths (and repeated webhoo
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import secrets
@@ -152,19 +153,33 @@ def cached_secret() -> str | None:
     return _secret_cache
 
 
-def register_webhooks(nc, cfg) -> None:
-    """(Re)register the NC core webhooks for upload detection. Never raises — on any failure we log
-    and lean on the periodic backstop scan so app-enable still succeeds."""
-    if not cfg.webhook_enabled:
-        _log(nc, LogLvl.INFO, "webhooks disabled by config — using the periodic backstop scan only")
-        return
+# appconfig_ex key holding a fingerprint of the webhook config last applied, so a change made on the
+# admin page (enable/URL/secret) is detected and re-registered without re-enabling the app — even
+# across container restarts.
+_APPLIED_KEY = "webhook_applied"
+
+
+def _fingerprint(enabled: bool, base: str, secret: str) -> str:
+    raw = f"{int(enabled)}|{base}|{secret}".encode()
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+def register_webhooks(nc, cfg) -> str:
+    """(Re)register the NC core webhooks for upload detection, or remove them when detection by
+    webhook is off. Returns the fingerprint of what was applied. Never raises — on any failure we
+    log and lean on the periodic backstop scan so app-enable still succeeds."""
     base = cfg.webhook_exapp_url
+    if not cfg.webhook_enabled:
+        unregister_webhooks(nc)
+        _log(nc, LogLvl.INFO, "webhooks disabled by config — using the periodic backstop scan only")
+        return _fingerprint(False, base, cfg.webhook_secret)
     if not base:
+        unregister_webhooks(nc)
         _log(nc, LogLvl.WARNING,
-             "WEBHOOK_EXAPP_URL is unset — skipping webhook registration (instant detection off; "
-             "the periodic scan still covers new files). Set it to the URL Nextcloud uses to reach "
-             "this exApp, e.g. http://<host>:<port>")
-        return
+             "the ExApp URL for webhooks (WEBHOOK_EXAPP_URL) is unset — skipping webhook "
+             "registration (instant detection off; the periodic scan still covers new files). Set "
+             "it under Administration → Recognize LLM → Upload detection, e.g. http://<host>:<port>")
+        return _fingerprint(True, "", cfg.webhook_secret)
     secret = ensure_secret(nc, cfg)
     uri = base + WEBHOOK_PATH
     unregister_webhooks(nc)  # drop any we registered before, so re-enable doesn't pile up duplicates
@@ -185,6 +200,31 @@ def register_webhooks(nc, cfg) -> None:
                  f"enabled? (occ app:enable webhook_listeners). Falling back to the periodic scan.")
     if created:
         _log(nc, LogLvl.INFO, f"registered {created} core webhook(s) → {uri}")
+    return _fingerprint(True, base, secret)
+
+
+def sync_webhooks(nc, cfg, force: bool = False) -> bool:
+    """Apply the current upload-detection settings if they changed since they were last applied
+    (or always, with *force*). Returns True when it (re)registered. A failed registration is still
+    recorded as applied — it is logged, the backstop scan covers detection, and the next settings
+    change or app enable retries — so a broken setup doesn't re-register every minute."""
+    global _secret_cache
+    if cfg.webhook_secret:
+        _secret_cache = cfg.webhook_secret  # the receiver must accept a secret changed on the page
+    want = _fingerprint(cfg.webhook_enabled, cfg.webhook_exapp_url, cfg.webhook_secret)
+    if not force:
+        try:
+            applied = {r.key: r.value for r in nc.appconfig_ex.get_values([_APPLIED_KEY])}
+        except Exception:
+            return False  # can't tell — don't churn the registrations
+        if applied.get(_APPLIED_KEY) == want:
+            return False
+    done = register_webhooks(nc, cfg)
+    try:
+        nc.appconfig_ex.set_value(_APPLIED_KEY, done)
+    except Exception as e:
+        _log(nc, LogLvl.WARNING, f"could not record the applied webhook config: {e!r}")
+    return True
 
 
 def unregister_webhooks(nc) -> None:

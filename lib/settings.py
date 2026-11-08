@@ -1,12 +1,16 @@
 """Runtime configuration for recognize_llm.
 
-Settings live in Nextcloud's app-config (``oc_appconfig_ex``) so an admin can edit them from the
-settings UI, with environment variables as the initial defaults (handy for ``register --env``).
+Settings live in Nextcloud's app-config (``oc_appconfig_ex``) so an admin can edit them on the
+**Administration → Recognize LLM** page (:mod:`settings_ui`). A key with no stored value falls back
+to its environment variable, then to the built-in default — so ``register --env``/kube env still
+seed a fresh install. Every key in ``_KEYS`` must have a field on the admin page
+(tests/test_settings_ui.py enforces it).
 """
 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from nc_py_api import NextcloudApp
@@ -65,8 +69,7 @@ _KEYS: dict[str, tuple[str, str]] = {
     # coordinates entirely local.
     "nominatim_url": ("NOMINATIM_URL", "https://nominatim.openstreetmap.org"),
     # Overpass endpoint for the nearest-landmark lookup (reverse geocoding alone can't
-    # name a landmark the photo was taken NEAR). Empty disables landmark search.
-    # No settings-UI field — configurable via env/appconfig for self-hosters.
+    # name a landmark the photo was taken NEAR). "off" (or an empty env var) disables it.
     "overpass_url": ("OVERPASS_URL", "https://overpass-api.de/api/interpreter"),
     # ── New-file detection (see lib/file_events.py) ──────────────────────────────
     # AppAPI 33/34 ship no file-event API (the old events_listener was dropped in the
@@ -86,6 +89,37 @@ _KEYS: dict[str, tuple[str, str]] = {
     "poll_enabled": ("POLL_ENABLED", "yes"),
     "poll_interval": ("POLL_INTERVAL", "900"),
 }
+
+
+# Keys whose value is a secret. The admin page shows them as password fields, and their
+# appconfig_ex rows MUST carry AppAPI's ``sensitive`` flag (see settings_ui.normalize_sensitive):
+# the form encrypts on save, but AppAPI only decrypts on our read when the row is flagged.
+SENSITIVE_KEYS: tuple[str, ...] = ("api_key", "webhook_secret")
+
+# Nextcloud ICrypto output: hex(ciphertext)|hex(iv)|hex(hmac)|version. A value of this shape read
+# back from appconfig_ex was encrypted by the settings form into an UNflagged row, so AppAPI handed
+# us the ciphertext instead of the secret.
+_NC_CIPHERTEXT_RE = re.compile(r"^[0-9a-f]+\|[0-9a-f]+\|[0-9a-f]+\|\d+$")
+
+_OFF = ("", "off", "none", "disabled")
+
+
+def looks_encrypted(value: str) -> bool:
+    return bool(value) and bool(_NC_CIPHERTEXT_RE.match(value))
+
+
+def fallback(key: str) -> str:
+    """What *key* resolves to when nothing is stored: its env var if set, else the built-in default."""
+    env_var, default = _KEYS[key]
+    return os.environ.get(env_var, default)
+
+
+def env_var(key: str) -> str:
+    return _KEYS[key][0]
+
+
+def keys() -> list[str]:
+    return list(_KEYS)
 
 
 @dataclass
@@ -135,10 +169,10 @@ def _raw(nc: NextcloudApp) -> dict[str, str]:
     """Resolve every key: appconfig_ex value if set, else env var, else built-in default."""
     stored = {r.key: r.value for r in nc.appconfig_ex.get_values(list(_KEYS))}
     out: dict[str, str] = {}
-    for key, (env_var, default) in _KEYS.items():
+    for key in _KEYS:
         value = stored.get(key)
         if value is None or value == "":
-            value = os.environ.get(env_var, default)
+            value = fallback(key)
         out[key] = value
     return out
 
@@ -163,7 +197,8 @@ def load(nc: NextcloudApp) -> Settings:
         face_match_min_similarity=min(0.95, max(0.1, float(r["face_match_min_similarity"] or 0.5))),
         geotag=str(r["geotag"]).lower() in ("1", "yes", "true", "on"),
         nominatim_url=r["nominatim_url"].strip() or "https://nominatim.openstreetmap.org",
-        overpass_url=r["overpass_url"].strip(),
+        # A stored "" means "fall back", so the admin page disables landmark search with "off".
+        overpass_url="" if r["overpass_url"].strip().lower() in _OFF else r["overpass_url"].strip(),
         webhook_enabled=str(r["webhook_enabled"]).lower() in ("1", "yes", "true", "on"),
         webhook_exapp_url=r["webhook_exapp_url"].strip().rstrip("/"),
         webhook_secret=r["webhook_secret"].strip(),

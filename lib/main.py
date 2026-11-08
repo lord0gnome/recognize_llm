@@ -23,6 +23,7 @@ import routes_events
 import routes_people
 import routes_tag_merge
 import settings as settings_mod
+import settings_sync
 import settings_ui
 import task_provider
 from fastapi import Depends, FastAPI, responses
@@ -33,6 +34,18 @@ from nc_py_api.files import ActionFileInfoEx
 workers = job_queue.Workers()
 provider_loop = task_provider.ProviderLoop()
 poll_loop = file_events.PollLoop()
+settings_watch = settings_sync.SettingsSync(workers)
+
+
+def _startup_concurrency() -> int:
+    """Pool size at boot: the admin-page value when NC answers, else the env var / default."""
+    try:
+        return settings_mod.load(NextcloudApp()).concurrency
+    except Exception:
+        try:
+            return max(1, int(settings_mod.fallback("concurrency") or 1))
+        except ValueError:
+            return 1
 
 
 def _thumb_backfill_worker() -> None:
@@ -58,14 +71,16 @@ async def lifespan(app: FastAPI):
     set_handlers(app, enabled_handler)
     job_queue.init_db()
     # Start the local worker pool + provider loop so a restart resumes any unfinished queue.
-    workers.start(int(os.environ.get("CONCURRENCY", "1") or 1))
+    workers.start(_startup_concurrency())
     provider_loop.start()
     poll_loop.start()  # backstop new-file detection; survives restarts without a re-enable
+    settings_watch.start()  # applies admin-page changes live; registers the settings page
     _thumb_backfill_worker()
     yield
     workers.stop()
     provider_loop.stop()
     poll_loop.stop()
+    settings_watch.stop()
 
 
 APP = FastAPI(lifespan=lifespan)
@@ -94,13 +109,14 @@ async def describe_now(
 def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
     try:
         if enabled:
+            settings_ui.register(nc)  # also flags secret rows sensitive — load settings after it
             cfg = settings_mod.load(nc)
-            settings_ui.register(nc)
             task_provider.register(nc)
             # New-file detection: NC core webhooks (instant) + a periodic backstop scan. Replaces
             # the old AppAPI events_listener, which AppAPI 33/34 no longer ship (see file_events).
-            file_events.register_webhooks(nc, cfg)
+            file_events.sync_webhooks(nc, cfg, force=True)
             poll_loop.start()
+            settings_watch.start()
             nc.ui.files_dropdown_menu.register_ex(
                 "recognize_llm_describe", "Describe with AI", "/describe_now",
                 mime="image", icon="img/icon.svg",
@@ -150,6 +166,7 @@ def enabled_handler(enabled: bool, nc: NextcloudApp) -> str:
             task_provider.unregister(nc)
             file_events.unregister_webhooks(nc)
             poll_loop.stop()
+            settings_watch.stop()
             nc.ui.files_dropdown_menu.unregister("recognize_llm_describe")
             nc.ui.top_menu.unregister("dashboard")
             nc.ocs("DELETE", "/ocs/v1.php/apps/app_api/api/v1/ui/script", params={

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import activity
 import face_pipeline
 import geo
 import storage
@@ -43,6 +44,7 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     node = nc.files.by_id(file_id)
     if node is None or node.is_dir:
         return Result("skipped", reason="not a file")
+    activity.stage("checking", name=node.name, path=node.user_path)
 
     # Shared-in, read-only file: we could caption it but never write the tags/description back
     # (403 on every attempt), and the owner's own job processes the file anyway. Skip BEFORE
@@ -65,18 +67,23 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
         return Result("skipped", reason="unchanged (already processed)")
 
     nc.log(LogLvl.INFO, f"recognize_llm: captioning {node.user_path} (user={user_id})")
+    activity.stage("downloading", size=size)
     raw_bytes = nc.files.download(node)
 
     if is_video:
         from video_utils import extract_frame_grid
+        activity.stage("extracting video frames")
         image_bytes = extract_frame_grid(raw_bytes)
     else:
         image_bytes = raw_bytes
 
     # GPS → place names: context for the model plus deterministic location tags.
     # Videos are skipped (frame grids carry no EXIF; container GPS atoms are rare).
+    if not is_video:
+        activity.stage("looking up location")
     location = None if is_video else geo.locate(raw_bytes, settings)
 
+    activity.stage("captioning")
     caption = VisionClient(settings).caption(
         image_bytes, mimetype, is_video=is_video,
         location=location.context() if location else "",
@@ -91,6 +98,7 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     # Additive canonicalization through the approved consolidation aliases: every tag keeps its
     # original name and gains its canonical right after it (storage does not re-slice).
     caption.tags = tag_consolidation.apply_aliases(caption.tags, tag_merge.get_alias_map())
+    activity.stage("writing tags & description")
     storage.write_results(nc, node, caption, settings)
     storage.set_marker(nc, node)
     nc.log(LogLvl.INFO, f"recognize_llm: tagged {node.user_path} with {caption.tags}")
@@ -98,6 +106,7 @@ def process_file(nc: NextcloudApp, user_id: str, file_id: int, settings: Setting
     # Extract face embeddings from images (not videos) when clustering is enabled, and
     # incrementally tag any already-known person so new uploads are grouped in real time.
     if not is_video and settings.face_clustering:
+        activity.stage("detecting faces")
         face_pipeline.extract_faces(nc, raw_bytes, user_id, file_id, settings)
 
     return Result("done", caption=caption, name=node.name, path=node.user_path)

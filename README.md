@@ -65,25 +65,69 @@ controlled concurrency so the local model is never flooded, and survives restart
 
 ## Configuration
 
-Settings live in Nextcloud app-config and can be seeded via environment variables at registration:
+Everything is configured on its own page: **Administration settings → Recognize LLM** (one card per
+topic). The page needs the tiny companion PHP app [`nextcloud/recognize_llm_settings`](nextcloud/recognize_llm_settings)
+installed and enabled in Nextcloud — ExApps can register settings *forms* but not an administration
+*section*, so the companion only declares the section. Without it the same cards appear under
+**Administration settings → Additional settings**.
 
-| Key | Env var | Default |
-|-----|---------|---------|
-| llama_url | `LLAMA_URL` | `http://host.docker.internal:8080` |
-| llama_model | `LLAMA_MODEL` | _(empty = server default)_ |
-| api_key | `LLAMA_API_KEY` | _(empty)_ |
-| max_tokens | `MAX_TOKENS` | `1024` |
-| prompt | `LLAMA_PROMPT` | built-in JSON-tagging prompt |
-| max_tags | `MAX_TAGS` | `8` |
-| mimetypes | `MIMETYPES` | `image/jpeg,image/png,image/webp,image/heic,…` |
-| concurrency | `CONCURRENCY` | `1` |
-| request_timeout | `REQUEST_TIMEOUT` | `180` |
-| write_comment | `WRITE_COMMENT` | `yes` |
-| webhook_enabled | `WEBHOOK_ENABLED` | `yes` |
-| webhook_exapp_url | `WEBHOOK_EXAPP_URL` | _(empty — required for instant detection)_ |
-| webhook_secret | `WEBHOOK_SECRET` | _(auto-generated on first enable)_ |
-| poll_enabled | `POLL_ENABLED` | `yes` |
-| poll_interval | `POLL_INTERVAL` | `900` _(seconds)_ |
+Values are stored in Nextcloud's app-config (`oc_appconfig_ex`). A key with nothing stored falls back
+to its environment variable, then to the built-in default, so `register --env`/kube env still seed a
+fresh install; the page shows the value actually in effect. Every key below has a field on the page
+(`tests/test_settings_ui.py` enforces it).
+
+Changes apply without a restart: workers re-read settings for every job, and a background sync
+([`lib/settings_sync.py`](lib/settings_sync.py)) applies concurrency and upload-detection changes
+within a minute (resizing the worker pool, re-registering the webhooks).
+
+| Card | Key | Env var | Default |
+|------|-----|---------|---------|
+| Vision model endpoint | llama_url | `LLAMA_URL` | `http://host.containers.internal:11434/v1` |
+| | llama_model | `LLAMA_MODEL` | _(empty = server default)_ |
+| | api_key 🔒 | `LLAMA_API_KEY` | _(empty)_ |
+| | max_tokens | `MAX_TOKENS` | `1024` |
+| | request_timeout | `REQUEST_TIMEOUT` | `180` |
+| Captioning | prompt | `LLAMA_PROMPT` | built-in JSON-tagging prompt |
+| | max_tags | `MAX_TAGS` | `8` |
+| | write_comment | `WRITE_COMMENT` | `yes` |
+| Files to process | mimetypes | `MIMETYPES` | `image/jpeg,image/png,image/webp,image/heic,…` |
+| | video_mimetypes | `VIDEO_MIMETYPES` | `video/mp4,video/mpeg,video/quicktime,…` |
+| | max_file_mb | `MAX_FILE_MB` | `2048` |
+| Queue workers | concurrency | `CONCURRENCY` | `1` |
+| People | face_clustering | `FACE_CLUSTERING` | `yes` |
+| | face_min_samples | `FACE_MIN_SAMPLES` | `3` |
+| | face_match_min_similarity | `FACE_MATCH_MIN_SIMILARITY` | `0.5` |
+| Location (GPS) | geotag | `GEOTAG` | `yes` |
+| | nominatim_url | `NOMINATIM_URL` | `https://nominatim.openstreetmap.org` |
+| | overpass_url | `OVERPASS_URL` | `https://overpass-api.de/api/interpreter` (`off` disables) |
+| Upload detection | webhook_enabled | `WEBHOOK_ENABLED` | `yes` |
+| | webhook_exapp_url | `WEBHOOK_EXAPP_URL` | _(empty — required for instant detection)_ |
+| | webhook_secret 🔒 | `WEBHOOK_SECRET` | _(auto-generated on first enable)_ |
+| | poll_enabled | `POLL_ENABLED` | `yes` |
+| | poll_interval | `POLL_INTERVAL` | `900` _(seconds)_ |
+
+🔒 Secrets are stored encrypted, shown as password fields, and their env value is never sent to the
+browser. **Gotcha:** AppAPI's form only round-trips a secret whose app-config row carries the
+`sensitive` flag; the app flags `api_key` and `webhook_secret` itself on startup/enable. If you set
+one with occ, use `occ app_api:app:config:set recognize_llm api_key --value … --sensitive 1`.
+
+Env vars that are **not** on the page, deliberately: the AppAPI runtime contract (`APP_ID`,
+`APP_SECRET`, `APP_HOST`, `APP_PORT`, `APP_VERSION`, `AA_VERSION`, `APP_PERSISTENT_STORAGE`,
+`NEXTCLOUD_URL`, `COMPUTE_DEVICE`) is needed before the app can even reach Nextcloud and must match
+the registration, so it stays in the deployment.
+
+### Installing the settings page (companion app)
+
+The companion also displays the description stored on each file (`oc:note`, which no stock UI
+shows): a **Description** tab in the Files sidebar, and a Description block at the top of the
+**Info** panel in Memories. It reads the value server-side through
+`/ocs/v2.php/apps/recognize_llm_settings/api/v1/description/{fileId}`, only for files the
+signed-in user can access.
+
+It is a plain PHP app with no state. On this deployment it is one of the custom apps handled by
+`../deploy-custom-apps.py recognize_llm_settings` (see `../CUSTOM-APPS.md`). Elsewhere, copy
+`nextcloud/recognize_llm_settings` to `custom_apps/` and `occ app:enable recognize_llm_settings`.
+The ExApp notices it within 15 minutes (or on its next restart/enable) and moves its cards there.
 
 ## Build & register (dev)
 
@@ -112,6 +156,28 @@ Enabling the app auto-registers the TaskProcessing provider, the file-event list
   ```
   (These routes are ADMIN access-level; call them through AppAPI.)
 - **On demand**: right-click an image in Files → **Describe with AI**.
+- **Descriptions** show in the Files sidebar (**Description** tab) and at the top of Memories'
+  **Info** panel (needs the companion app).
+
+### Is it working? (AI Queue page)
+
+The **AI Queue** entry in the top menu opens the dashboard. Its status card answers "working or
+stuck?" from the live engine, not just the queue counts. It refreshes every 4 s:
+
+| Status | Meaning |
+|---|---|
+| **Working** (green) | A worker is processing a file. |
+| **Idle** (grey) | Nothing is queued. |
+| **Retrying** (yellow) | A Nextcloud/network error; the worker backs off (≤5 min) and retries by itself. |
+| **Paused** (red) | The vision model is unreachable; the queue waits and probes it, resuming automatically. |
+| **Stalled** (red) | A stage has run far too long (>5 min, captioning >5 min + request timeout), or files are waiting but nothing finished for 15 min. |
+| **Stopped** (red) | No worker thread is alive. |
+| **Unreachable** (red) | The page can't reach the app container at all. |
+
+Below the verdict are the last completion, files per hour, the rate and ETA, and the live
+workers. Admins also see each worker's current file and stage (downloading, captioning, detecting
+faces…) with a ticking elapsed time, plus a list of recent engine events (outages, backoffs, job
+errors). Other users only see the verdict and the numbers.
 
 ## Tests
 
@@ -127,6 +193,7 @@ make test       # python -m pytest tests/
 - [x] M3 resumable backfill
 - [x] M4 OCC command (`occ recognize_llm:backfill`) — no more manual curl
 - [x] M5 admin settings UI, `max_tokens` config, improved default prompt
+- [x] M8 dedicated **Administration → Recognize LLM** page covering every env var, applied live
 - [x] M6 TaskProcessing input-file fetch — verified `tasks_provider/{taskId}/file/{fileId}` against
       the running server (NC 34 / app_api 34.0.0). Found and fixed a real bug along the way: the
       custom task type's shape entries must use the key `shape_type`, not `type`

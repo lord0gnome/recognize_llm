@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
+	<id>recognize_llm_settings</id>
+	<name>Recognize LLM companion</name>
+	<summary>Settings page for the Recognize LLM ExApp, and shows its image descriptions in Files and Memories</summary>
+	<description>
+	<![CDATA[
+Companion to the **Recognize LLM** ExApp. ExApps can register settings forms but not an
+administration *section*, so this app only declares the "Recognize LLM" section; the ExApp
+fills it with its forms. Without this app the ExApp's forms appear under Administration →
+Additional settings instead.
+
+It also shows the description the ExApp generates for each image: a **Description** tab in the
+Files sidebar, and a Description block at the top of the Info panel in Memories. It stores
+nothing and has no settings of its own.
+	]]>
+	</description>
+	<version>1.1.0</version>
+	<licence>agpl</licence>
+	<author mail="lord0gnome@gmail.com">gnome</author>
+	<namespace>RecognizeLlmSettings</namespace>
+	<category>tools</category>
+	<bugs>https://github.com/lord0gnome/recognize_llm/issues</bugs>
+	<dependencies>
+		<nextcloud min-version="30" max-version="34"/>
+	</dependencies>
+	<settings>
+		<admin-section>OCA\RecognizeLlmSettings\Settings\AdminSection</admin-section>
+	</settings>
+</info>

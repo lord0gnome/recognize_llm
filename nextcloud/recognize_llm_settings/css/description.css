@@ -1,0 +1,30 @@
+.rllm-description-tab {
+	display: block;
+	padding: 8px 4px;
+}
+
+.rllm-description-block {
+	margin: 4px 10px 12px;
+	padding: 10px 12px;
+	border-radius: var(--border-radius-large, 10px);
+	background-color: var(--color-background-hover);
+}
+
+.rllm-description-block h3 {
+	margin: 0 0 6px;
+	font-size: 1em;
+	font-weight: bold;
+	color: var(--color-text-maxcontrast);
+}
+
+.rllm-description-text {
+	margin: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	line-height: 1.5;
+}
+
+.rllm-description-empty {
+	color: var(--color-text-maxcontrast);
+	font-style: italic;
+}

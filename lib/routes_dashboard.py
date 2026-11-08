@@ -24,7 +24,7 @@ _PROXY_BASE = f"{_NC_URL}/index.php/apps/app_api/proxy/{_APP_ID}"
 
 @router.get("/dashboard/api/status")
 async def api_status(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
-    return job_queue.status(user_id=nc.user or None)
+    return job_queue.engine_status(user_id=nc.user or None, include_details=False)
 
 
 @router.get("/dashboard/api/recent")
@@ -46,7 +46,7 @@ async def api_retry_failed(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict
 
 @router.get("/dashboard/api/all/status")
 async def api_all_status(nc: Annotated[NextcloudApp, Depends(nc_app)]) -> dict:
-    out = job_queue.status(user_id=None)
+    out = job_queue.engine_status(user_id=None, include_details=True)
     out["by_user"] = job_queue.status_by_user()
     return out
 
@@ -134,6 +134,54 @@ var CSS = `
   50%     { transform:scale(1.4); opacity:0.6; }
 }
 #rlm-dash .lup { margin-left: auto; font-size: 0.75rem; color: #666; }
+
+/* Engine status: what the backend is doing right now */
+#rlm-dash .engine {
+  background:#25262b; border-radius:12px; border:1px solid #2c2d32; border-left-width:4px;
+  padding:14px 16px; margin:-12px 0 24px;
+}
+#rlm-dash .engine.h-working  { border-left-color:#51cf66; }
+#rlm-dash .engine.h-idle     { border-left-color:#868e96; }
+#rlm-dash .engine.h-degraded { border-left-color:#fcc419; }
+#rlm-dash .engine.h-paused, #rlm-dash .engine.h-stalled, #rlm-dash .engine.h-stopped,
+#rlm-dash .engine.h-unreachable { border-left-color:#ff6b6b; }
+#rlm-dash .eline { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+#rlm-dash .epill {
+  font-size:0.65rem; text-transform:uppercase; letter-spacing:1px; font-weight:700;
+  padding:3px 10px; border-radius:20px; flex-shrink:0;
+}
+#rlm-dash .h-working .epill  { background:rgba(81,207,102,.15); color:#51cf66; }
+#rlm-dash .h-idle .epill     { background:rgba(134,142,150,.15); color:#adb5bd; }
+#rlm-dash .h-degraded .epill { background:rgba(252,196,25,.15); color:#fcc419; }
+#rlm-dash .h-paused .epill, #rlm-dash .h-stalled .epill, #rlm-dash .h-stopped .epill,
+#rlm-dash .h-unreachable .epill { background:rgba(255,107,107,.15); color:#ff6b6b; }
+#rlm-dash .emsg { color:#e0e0e0; font-size:0.9rem; min-width:0; overflow-wrap:anywhere; }
+#rlm-dash .emeta { color:#888; font-size:0.75rem; margin-top:8px; display:flex; gap:16px; flex-wrap:wrap; }
+#rlm-dash .emeta b { color:#ccc; font-weight:600; }
+#rlm-dash .eslots { margin-top:10px; border-top:1px solid #2c2d32; }
+#rlm-dash .eslot {
+  display:flex; gap:12px; align-items:baseline; padding:7px 0; font-size:0.78rem;
+  border-bottom:1px solid #2c2d32;
+}
+#rlm-dash .eslot:last-child { border-bottom:none; }
+#rlm-dash .eslot .sid { color:#666; flex-shrink:0; width:62px; }
+#rlm-dash .eslot .sstate { flex-shrink:0; width:120px; font-weight:600; }
+#rlm-dash .eslot .sfile { flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:#ccc; }
+#rlm-dash .eslot .sage { flex-shrink:0; color:#888; font-variant-numeric:tabular-nums; }
+#rlm-dash .eslot.stuck .sage, #rlm-dash .eslot.stuck .sstate { color:#ff6b6b; }
+#rlm-dash .st-processing { color:#4dabf7; }
+#rlm-dash .st-idle { color:#868e96; }
+#rlm-dash .st-waiting_vision { color:#ff6b6b; }
+#rlm-dash .st-backoff { color:#fcc419; }
+#rlm-dash details.eevents { margin-top:10px; font-size:0.75rem; color:#888; }
+#rlm-dash details.eevents summary { cursor:pointer; user-select:none; }
+#rlm-dash .eev { display:flex; gap:10px; padding:3px 0; }
+#rlm-dash .eev .et { flex-shrink:0; color:#666; font-variant-numeric:tabular-nums; width:70px; }
+#rlm-dash .eev .em { min-width:0; overflow-wrap:anywhere; color:#aaa; }
+@media (max-width: 600px) {
+  #rlm-dash .eslot { flex-wrap:wrap; }
+  #rlm-dash .eslot .sfile { flex-basis:100%; order:3; }
+}
 #rlm-dash .badge {
   font-size:0.6rem; text-transform:uppercase; letter-spacing:1px; font-weight:600;
   padding:3px 10px; border-radius:20px; background:rgba(77,171,247,0.12);
@@ -312,6 +360,12 @@ var HTML = `
     <button id="rlm-tm-discard" class="rbtn" style="display:none">Discard</button>
     <button id="rlm-tm-stop" class="rbtn" style="display:none">Stop</button>
   </div>
+</div>
+<div class="engine h-idle" id="rlm-engine">
+  <div class="eline"><span class="epill" id="rlm-epill">…</span><span class="emsg" id="rlm-emsg">Checking the engine…</span></div>
+  <div class="emeta" id="rlm-emeta"></div>
+  <div class="eslots" id="rlm-eslots" style="display:none"></div>
+  <details class="eevents" id="rlm-eevents" style="display:none"><summary>Recent engine events</summary><div id="rlm-eevlist"></div></details>
 </div>
 <div class="stats">
   <div class="stat pending">  <div class="snum" id="rlm-pending">—</div>  <div class="slbl">Pending</div></div>
@@ -636,10 +690,107 @@ function updateStats(s) {
   var rb = document.getElementById('rlm-retry');
   if (rb) rb.style.display = (s.failed || 0) > 0 ? 'block' : 'none';
   updateByUser(s.by_user);
+  updateEngine(s.engine);
+}
+
+/* ── Engine status (what the backend is doing right now) ─────────────────── */
+var HEALTH_LABEL = {
+  working:'Working', idle:'Idle', paused:'Paused', degraded:'Retrying',
+  stalled:'Stalled', stopped:'Stopped', unreachable:'Unreachable'
+};
+var HEALTH_COLOR = {
+  working:'#51cf66', idle:'#868e96', degraded:'#fcc419',
+  paused:'#ff6b6b', stalled:'#ff6b6b', stopped:'#ff6b6b', unreachable:'#ff6b6b'
+};
+var STATE_LABEL = {
+  processing:'Processing', idle:'Idle', waiting_vision:'Waiting for model', backoff:'Backing off'
+};
+var _eng = null, _engAt = 0;  /* last engine payload + local receipt time, for live ages */
+
+function age(sec) {
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 90) return sec + 's';
+  if (sec < 5400) return Math.round(sec / 60) + ' min';
+  return Math.floor(sec / 3600) + ' h ' + Math.round(sec % 3600 / 60) + ' min';
+}
+function srvNow() { return _eng ? _eng.now + (Date.now() - _engAt) / 1000 : Date.now() / 1000; }
+
+function setHealth(h, msg) {
+  var box = document.getElementById('rlm-engine');
+  if (!box) return;
+  box.className = 'engine h-' + h;
+  document.getElementById('rlm-epill').textContent = HEALTH_LABEL[h] || h;
+  document.getElementById('rlm-emsg').textContent = msg;
+  var dot = document.getElementById('rlm-dot');
+  if (dot) {
+    dot.style.background = HEALTH_COLOR[h] || '#868e96';
+    dot.style.animation = h === 'working' ? '' : 'none';
+  }
+}
+
+function updateEngine(e) {
+  if (!e) return;
+  _eng = e; _engAt = Date.now();
+  setHealth(e.health, e.message);
+  renderEngineAges();
+
+  var ev = document.getElementById('rlm-eevents');
+  if (e.events && e.events.length) {
+    ev.style.display = 'block';
+    document.getElementById('rlm-eevlist').innerHTML = e.events.map(function(x) {
+      return '<div class="eev"><span class="et">' + new Date(x.ts * 1000).toLocaleTimeString() +
+        '</span><span class="em">' + esc(x.message) + '</span></div>';
+    }).join('');
+  } else {
+    ev.style.display = 'none';
+  }
+}
+
+/* Re-rendered every second so elapsed times tick between polls. */
+function renderEngineAges() {
+  var e = _eng;
+  if (!e) return;
+  var now = srvNow();
+  var meta = [];
+  meta.push('Last completed: <b>' + (e.last_done_ts ? age(now - e.last_done_ts) + ' ago' : 'never') + '</b>');
+  meta.push('Last hour: <b>' + fmt(e.done_last_hour) + '</b> files');
+  if (e.done_last_15min) meta.push('Rate: <b>' + (e.done_last_15min / 15).toFixed(1) + '</b>/min');
+  if (e.eta_seconds) meta.push('Queue clears in ~<b>' + age(e.eta_seconds) + '</b>');
+  meta.push('Workers: <b>' + e.workers_alive + '/' + e.concurrency + '</b>');
+  meta.push('Engine up: <b>' + age(now - e.started_at) + '</b>');
+  document.getElementById('rlm-emeta').innerHTML = meta.join('');
+
+  var box = document.getElementById('rlm-eslots');
+  if (!e.slots || !e.slots.length) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  box.innerHTML = e.slots.map(function(s) {
+    var j = s.job || {};
+    var what, since;
+    if (s.state === 'processing') {
+      what = (j.path || j.name || ('file ' + j.file_id)) + (j.user_id ? '  ·  ' + j.user_id : '') +
+             (j.attempt > 1 ? '  ·  attempt ' + j.attempt : '');
+      since = s.stage_since;
+    } else if (s.state === 'backoff') {
+      what = 'retry in ' + age((s.until || now) - now) + (s.detail ? '  ·  ' + s.detail : '');
+      since = s.since;
+    } else if (s.state === 'waiting_vision') {
+      what = s.detail || 'vision model unreachable';
+      since = s.since;
+    } else {
+      what = 'no work queued';
+      since = s.since;
+    }
+    var st = s.state === 'processing' && s.stage ? s.stage : (STATE_LABEL[s.state] || s.state);
+    return '<div class="eslot' + (s.stalled ? ' stuck' : '') + '">' +
+      '<span class="sid">Worker ' + (s.slot + 1) + '</span>' +
+      '<span class="sstate st-' + s.state + '">' + esc(st) + '</span>' +
+      '<span class="sfile" title="' + esc(what) + '">' + esc(what) + '</span>' +
+      '<span class="sage">' + age(now - since) + '</span></div>';
+  }).join('');
 }
 
 /* ── Per-user breakdown (admin only — /all/status includes by_user) ──────── */
-function esc(s) { return String(s).replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 
 function updateByUser(list) {
   var box = document.getElementById('rlm-byuser');
@@ -751,19 +902,17 @@ function startPolling() {
       updateRecent(results[1]);
       var lup = document.getElementById('rlm-lup');
       if (lup) lup.textContent = 'Updated ' + new Date().toLocaleTimeString();
-      var dot = document.getElementById('rlm-dot');
-      if (dot) dot.style.background = '#51cf66';
     }).catch(function() {
       var lup = document.getElementById('rlm-lup');
       if (lup) lup.textContent = 'Error — retrying…';
-      var dot = document.getElementById('rlm-dot');
-      if (dot) dot.style.background = '#ff6b6b';
+      setHealth('unreachable', 'The dashboard cannot reach the Recognize LLM app (container down or restarting?). Retrying every 4 s.');
     });
   }
 
   _poll = poll;
   poll();
   setInterval(poll, 4000);
+  setInterval(renderEngineAges, 1000);
   setInterval(function() {
     document.querySelectorAll('#rlm-dash .card').forEach(function(card) {
       if (card.dataset.ts) card.querySelector('.ctime').textContent = relTime(Number(card.dataset.ts));

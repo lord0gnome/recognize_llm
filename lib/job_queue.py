@@ -13,6 +13,7 @@ import sqlite3
 import threading
 import time
 
+import activity
 import settings as settings_mod
 from nc_py_api import NextcloudApp
 from nc_py_api.ex_app import LogLvl, persistent_storage
@@ -66,7 +67,10 @@ def _vision_reachable(chat_url: str) -> bool:
 
 
 def _safe_log(nc, msg: str) -> None:
-    """Log to Nextcloud without ever raising — logging failures must not bubble into the worker loop."""
+    """Log to Nextcloud without ever raising — logging failures must not bubble into the worker loop.
+    Also lands in the dashboard's "recent events" list (activity), since every caller is a notable
+    engine event (outage, backoff, respawn, job error)."""
+    activity.event(msg.removeprefix("recognize_llm: "))
     try:
         nc.log(LogLvl.ERROR, msg)
     except Exception:
@@ -135,6 +139,7 @@ def init_db() -> None:
         _add_column(con, "face_embeddings", "det_score", "REAL NOT NULL DEFAULT 0")
         con.execute("CREATE INDEX IF NOT EXISTS idx_face_emb_person ON face_embeddings(user_id, cluster_id)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_face_emb_file ON face_embeddings(user_id, file_id)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_updated ON jobs(status, updated_at)")
 
         # Small JPEG face crops (~112px) shown in the People review UI. Kept in a side table so
         # the embeddings table stays lean and thumbnails can be pruned independently.
@@ -333,6 +338,20 @@ def status(user_id: str | None = None) -> dict:
     }
 
 
+def throughput(now: float | None = None) -> dict:
+    """Completions (done, incl. skipped) over the last 15 min / hour, and the latest one."""
+    now = int(now or time.time())
+    with _connect() as con:
+        r = con.execute(
+            "SELECT MAX(updated_at) last, "
+            "SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END) q, "
+            "SUM(CASE WHEN updated_at >= ? THEN 1 ELSE 0 END) h "
+            "FROM jobs WHERE status='done'",
+            (now - 900, now - 3600),
+        ).fetchone()
+    return {"last_done_ts": r["last"] or 0, "done_last_15min": r["q"] or 0, "done_last_hour": r["h"] or 0}
+
+
 def status_by_user() -> list[dict]:
     """Per-user job counts, busiest queues first (admin dashboard)."""
     with _connect() as con:
@@ -500,38 +519,82 @@ def reap_stuck_jobs(max_age: int = STUCK_JOB_TIMEOUT) -> int:
         return cur.rowcount
 
 
+# The running pool (set by Workers.start), for the dashboard's live engine status.
+ACTIVE: "Workers | None" = None
+
+
+def engine_status(user_id: str | None = None, include_details: bool = False) -> dict:
+    """Queue counts + live engine verdict (see activity.engine_status)."""
+    counts = status(user_id=user_id)
+    w = ACTIVE
+    eng = activity.engine_status(
+        counts=status(user_id=None),  # health is about the shared engine, not one user's slice
+        throughput=throughput(),
+        workers_alive=w.alive() if w else 0,
+        concurrency=w.concurrency if w else 0,
+        include_details=include_details,
+    )
+    counts["engine"] = eng
+    return counts
+
+
 class Workers:
     """Owns the worker threads plus a supervisor that respawns dead workers and reaps stuck jobs."""
 
     def __init__(self):
         self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
+        # One thread per slot 0..concurrency-1. A slot >= the target concurrency retires itself
+        # after its current job, so the pool can shrink without interrupting work.
+        self._threads: dict[int, threading.Thread] = {}
         self._concurrency = 0
+        self._lock = threading.Lock()
         self._supervisor: threading.Thread | None = None
         self._outage_reason = ""
+        self._last_transient = ""
 
     def start(self, concurrency: int) -> None:
+        global ACTIVE
+        ACTIVE = self
         self._stop.clear()
-        self._concurrency = max(self._concurrency, concurrency)
-        self._ensure_workers()
+        self.set_concurrency(concurrency)
         if self._supervisor is None or not self._supervisor.is_alive():
             self._supervisor = threading.Thread(target=self._supervise, name="recognize-llm-supervisor", daemon=True)
             self._supervisor.start()
 
+    @property
+    def concurrency(self) -> int:
+        return self._concurrency
+
+    def set_concurrency(self, concurrency: int) -> bool:
+        """Grow or shrink the pool to *concurrency* (min 1). Returns True if the target changed."""
+        concurrency = max(1, int(concurrency))
+        changed = concurrency != self._concurrency
+        self._concurrency = concurrency
+        self._ensure_workers()
+        return changed
+
+    def alive(self) -> int:
+        return sum(1 for slot, t in self._threads.items() if slot < self._concurrency and t.is_alive())
+
     def _ensure_workers(self) -> None:
-        """Drop dead threads and (re)spawn up to the target concurrency."""
-        self._threads = [t for t in self._threads if t.is_alive()]
-        while len(self._threads) < self._concurrency:
-            t = threading.Thread(target=self._loop, name=f"recognize-llm-worker-{len(self._threads)}", daemon=True)
-            t.start()
-            self._threads.append(t)
+        """Drop dead threads and (re)spawn any missing slot below the target concurrency."""
+        if self._stop.is_set():
+            return
+        with self._lock:
+            self._threads = {slot: t for slot, t in self._threads.items() if t.is_alive()}
+            for slot in range(self._concurrency):
+                if slot not in self._threads:
+                    t = threading.Thread(target=self._loop, args=(slot,),
+                                         name=f"recognize-llm-worker-{slot}", daemon=True)
+                    t.start()
+                    self._threads[slot] = t
 
     def _supervise(self) -> None:
         """Every 60s: respawn any worker that died, and requeue jobs wedged in 'processing'."""
         nc = NextcloudApp()
         while not self._stop.wait(60):
             try:
-                before = len([t for t in self._threads if t.is_alive()])
+                before = self.alive()
                 self._ensure_workers()
                 if before < self._concurrency:
                     _safe_log(nc, f"recognize_llm: supervisor respawned worker(s) ({before}/{self._concurrency} alive)")
@@ -544,22 +607,40 @@ class Workers:
     def stop(self) -> None:
         self._stop.set()
 
-    def _loop(self) -> None:
+    def _loop(self, slot: int = 0) -> None:
+        activity.bind_slot(slot)
+        try:
+            self._loop_inner(slot)
+        finally:
+            activity.clear_slot(slot)
+
+    def _loop_inner(self, slot: int) -> None:
         nc = NextcloudApp()
+        idle_marked = False
         idle = 0.0
         fails = 0            # consecutive job failures — a run of these means the nc session went bad
         last_refresh = 0.0
         transient_streak = 0  # consecutive infrastructure failures — drives the escalating backoff
         while not self._stop.is_set():
+            if slot >= self._concurrency:
+                return  # concurrency was lowered: retire between jobs, never mid-job
             # Outer guard: a failure in _claim / _finish / logging must NEVER kill the worker thread,
             # or the (single) worker dies silently and the queue stalls until a container restart.
             try:
                 row = _claim()
                 if row is None:
+                    if not idle_marked:
+                        activity.set_slot(slot, activity.IDLE)
+                        idle_marked = True
                     idle = min(idle + 0.5, 5.0)
                     time.sleep(idle)
                     continue
                 idle = 0.0
+                idle_marked = False
+                activity.set_slot(slot, activity.PROCESSING, job={
+                    "user_id": row["user_id"], "file_id": int(row["file_id"]),
+                    "source": row.get("source"), "attempt": int(row["attempts"] or 0) + 1,
+                })
                 result = self._process_one(nc, row)
                 if result == "vision_down":
                     # Backend outage: the job went back to pending un-burned. Without this
@@ -567,7 +648,7 @@ class Workers:
                     # expensive download+ffmpeg pass just to fail at the vision call, and
                     # after MAX_ATTEMPTS passes the whole queue lands in 'failed'
                     # (the "queue is stuck until someone clicks Retry" pattern).
-                    self._wait_for_vision(nc)
+                    self._wait_for_vision(nc, slot)
                     continue
                 if result == "transient":
                     # Infrastructure trouble. The job is already requeued un-burned. Pause with
@@ -579,6 +660,8 @@ class Workers:
                                 TRANSIENT_BACKOFF_CAP)
                     _safe_log(nc, f"recognize_llm: transient infra failure #{transient_streak} — "
                                   f"backing off {pause:.0f}s, rebuilding session")
+                    activity.set_slot(slot, activity.BACKOFF, detail=self._last_transient[:200],
+                                      until=time.time() + pause)
                     try:
                         nc = NextcloudApp()
                     except Exception:
@@ -609,6 +692,7 @@ class Workers:
         from vision_client import VisionUnavailable
         try:
             cfg = settings_mod.load(nc)
+            activity.request_timeout = cfg.request_timeout
             res = processor.process_file(
                 nc, row["user_id"], int(row["file_id"]), cfg, force=bool(row["force"])
             )
@@ -629,6 +713,7 @@ class Workers:
                 # Not the job's fault: requeue un-burned (rotates to the back of the queue) and let
                 # the loop apply backoff + a fresh session. The queue never parks on these.
                 _requeue(row, f"transient: {e}")
+                self._last_transient = str(e)
                 _safe_log(nc, f"recognize_llm: transient infra error on user={row['user_id']} "
                               f"file={row['file_id']} — will retry: {e}")
                 return "transient"
@@ -639,9 +724,10 @@ class Workers:
                 time.sleep(2.0)
             return "fail"
 
-    def _wait_for_vision(self, nc) -> None:
+    def _wait_for_vision(self, nc, slot: int = 0) -> None:
         """Hold this worker while the vision backend is down; cheap probe until it answers."""
         delay = 15.0
+        activity.set_slot(slot, activity.WAITING_VISION, detail=self._outage_reason[:200])
         _safe_log(nc, f"recognize_llm: vision backend down — pausing queue ({self._outage_reason})")
         while not self._stop.is_set():
             if self._stop.wait(delay):

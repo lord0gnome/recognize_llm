@@ -1,15 +1,25 @@
 # Operations: the real production topology (read me first)
 
-*Last verified 2026-08-21. This documents the **live** deployment as it actually is — it supersedes
-any assumption in [PRODUCTION.md](PRODUCTION.md) (a generic runbook) about where the app runs.*
+*Last verified 2026-08-21, LLM endpoint and settings updated 2026-11-08. This documents the **live**
+deployment as it actually is — it supersedes any assumption in [PRODUCTION.md](PRODUCTION.md)
+(a generic runbook) about where the app runs.*
+
+> **2026-11-08 — the LLM endpoint moved.** apoc replaced llama-swap with **Strata** (2026-11-04) and
+> on 2026-11-07 disabled the token-logger that served `:11434`, so `http://192.168.0.143:11434/v1`
+> refuses connections and the queue pauses ("vision backend down"); face scanning stops with it
+> because it runs inside the same job. Strata serves one model, `swift-1.5-iq3_xxs` (images: yes),
+> on apoc's **loopback only** (`127.0.0.1:5002`, key required), which the rootless app pod cannot
+> reach. mnemonic-proxy (`127.0.0.1:8096`) is Hermes-only — it archives every conversation in
+> plaintext; don't point this app at it. See "The LLM endpoint" below for the fix.
 
 ## TL;DR
 
 - **Production recognize_llm runs on `apoc` (192.168.0.143)**, not on the Nextcloud host.
 - The kube stack on the Nextcloud host (`~/infra/`, `recognize-llm-stack.service`) is an
   **unregistered duplicate**. Never run both at once (see [The two-instance incident](#the-two-instance-incident)).
-- The LLM endpoint is **llama-swap** on apoc (port 11434), one config entry per model.
-  Captioning uses **`qwen3.8-26b-vision`**.
+- The LLM endpoint is **Strata** on apoc (since 2026-11-04; was llama-swap), reached through the
+  token-logger on port 11434 — which must be running (see the 2026-11-08 note above).
+- **All settings are on Administration settings → Recognize LLM** (since 2026-11-08), applied live.
 - If the queue freezes with `[400] Bad Request <find: …>` on every job:
   `ssh apoc podman restart nc-app-recognize-llm-app`. Root cause below.
 
@@ -37,12 +47,12 @@ Nextcloud host (192.168.0.105)                 apoc (192.168.0.143, RTX 4090)
 | Queue / face DB | apoc | volume-mounted `/nc_app_recognize_llm_data/recognize_llm_queue.db` — **authoritative** (named persons live here) |
 | Upload webhooks | NC → apoc | `oc_webhook_listeners` rows POST to `http://192.168.0.143:23000/events/webhook` |
 | LLM endpoint | apoc, rootful podman | quadlet `/opt/infra/systemd-containers/llama-cpp/llama-server.container` (service `llama-server.service`) |
-| App settings | NC DB (`oc_appconfig_ex`) | shared by any running instance; edit via `occ app_api:app:config:set recognize_llm …` |
+| App settings | NC DB (`oc_appconfig_ex`) | shared by any running instance; edit on **Administration settings → Recognize LLM** (page provided by the `recognize_llm_settings` companion app on the NC host) |
 
 ## Deploying new app code
 
 CI builds `ghcr.io/lord0gnome/recognize_llm:latest` on every push to `main`. The apoc deploy script
-does **not** pull, so:
+does **not** pull (`imagePullPolicy: IfNotPresent`), so:
 
 ```bash
 git push                                   # wait for the GitHub Action to finish
@@ -51,7 +61,29 @@ podman pull ghcr.io/lord0gnome/recognize_llm:latest
 /home/gnome/infra/recognize-llm/deploy.sh   # kube play --replace; queue DB volume survives
 ```
 
-## The LLM endpoint: llama-swap
+## The LLM endpoint
+
+### Current: Strata (since 2026-11-04)
+
+Strata (`stratallm.service`, rootful quadlet `/opt/infra/systemd-containers/stratallm.container`)
+listens on `127.0.0.1:5002` only and needs its key. Clients on other hosts or in rootless pods reach
+it through the **token-logger** on `:11434` (host network; it swaps the client key for Strata's and
+asks the GPU broker for the card when Strata is stopped). Its `token-logger.env` already accepts the
+**old llama-swap key**, which is the `api_key` this app has, so restoring it needs no app change
+except the model name. As root on apoc:
+
+```bash
+D=/opt/infra/systemd-containers/token-logger
+sudo mv $D/token-logger.container.disabled-20261107 $D/token-logger.container
+sudo systemctl daemon-reload && sudo systemctl start token-logger
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.0.143:11434/v1/models   # want 401 (key required)
+```
+
+Then on **Administration settings → Recognize LLM → Vision model endpoint** set *Model name* to
+`swift-1.5-iq3_xxs` (the old `qwen3.8-26b-vision` key does not exist on Strata). The paused queue
+resumes on its own within a few minutes once the endpoint answers.
+
+### Before 2026-11-04: llama-swap (historical)
 
 Since 2026-08-21 apoc runs **llama-swap** (`ghcr.io/mostlygeek/llama-swap:cuda`) instead of
 llama.cpp's router mode. Reason: the router applies one global `-c 131072`, and any model whose
@@ -67,16 +99,11 @@ line**; per-model context sizes encode each VRAM budget.
 - Status/logs/manual load-unload web UI: <http://192.168.0.143:11434/ui>.
 - The old router quadlet is preserved as `llama-server.container.bak-20260821`.
 
-Captioning model: **`qwen3.8-26b-vision`** — Q4_K_M + `mmproj-BF16` (hardlinked files, zero extra
+Captioning model (llama-swap era): **`qwen3.8-26b-vision`** — Q4_K_M + `mmproj-BF16` (hardlinked files, zero extra
 disk) at `-c 32768`, preloaded at service start via llama-swap's `hooks.on_startup` so the queue
 never waits on a cold load. Alternatives already configured: `qwen3.8-27b-vision` (Q3_K_XL,
-`-c 65536`, roomier context) and `gemma-4-26b` (the proven previous captioner). Switch with:
-
-```bash
-occ app_api:app:config:set recognize_llm llama_model --value "<model-key>" --update-only
-```
-
-Workers reload settings per job — no restart needed.
+`-c 65536`, roomier context) and `gemma-4-26b` (the proven previous captioner). Switch on the settings page (*Model name*);
+workers reload settings per job — no restart needed.
 
 ## The queue-freeze root cause (400 storms)
 
@@ -154,6 +181,10 @@ ran: double-processing every upload, and both eventually wedged in the 400 trap 
 container was stopped on 2026-08-21. Rules going forward:
 
 - **Never run both instances.** The registered one (apoc) is production.
+- *2026-11-08:* the local container `nc-app-recognize-llm-app` was found **running** again on the
+  Nextcloud host (started at the 2026-11-06 boot by its `restart=always` policy, even though
+  `recognize-llm-stack.service` is disabled). It was idle and was stopped with `podman stop`; to keep
+  it from returning at the next boot, remove it or `podman update --restart=no` it.
 - The local stack's boot service must stay off:
   `systemctl --user disable --now recognize-llm-stack.service` on the Nextcloud host
   (as of writing, the container is stopped but the service may still be enabled).
